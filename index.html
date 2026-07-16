@@ -1242,6 +1242,7 @@ function renderItemProfile(id) {
         ${it.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}
       </div>
       <div class="flex gap-2">
+        <button onclick="openDeleteItemModal('${it.id}')" class="btn btn-danger">Delete</button>
         <button onclick="toggleItemActive('${it.id}')" class="btn btn-ghost">${it.active ? 'Deactivate' : 'Activate'}</button>
         <button onclick="openItemModal('${it.id}')" class="btn btn-primary">Edit Product</button>
       </div>
@@ -1302,6 +1303,24 @@ function renderItemProfile(id) {
           </label>`).join('') || '<span class="text-sm text-slate-400">No menu groups defined.</span>'}
       </div>
     </div>`;
+}
+function openDeleteItemModal(itemId) {
+  const it = state.items.find(i => i.id === itemId); if (!it) return;
+  openModal('Delete product', `
+    <div class="space-y-3">
+      <p class="text-sm text-slate-700">Delete <strong>${escapeHTML(it.nameEn)}</strong> permanently? Its modifier setup, photo, and branch settings go with it.</p>
+      <div class="bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-amber-800">
+        Past orders keep their record — they store the name and price as sold.
+        If the product is only out of season, use <strong>Deactivate</strong> instead: it leaves the menu but keeps its setup for when it returns.
+      </div>
+    </div>`, async () => {
+    const { error } = await sb.from('menu_items').delete().eq('id', itemId);
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    state.items = state.items.filter(i => i.id !== itemId);
+    state.itemModGroups = state.itemModGroups.filter(x => x.itemId !== itemId);
+    location.hash = '#/menu';
+    render(); toast('Product deleted', 'success');
+  }, { saveLabel: 'Delete' });
 }
 async function toggleItemActive(itemId) {
   const it = state.items.find(i => i.id === itemId); if (!it) return;
