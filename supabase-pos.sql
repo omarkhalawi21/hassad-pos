@@ -703,6 +703,16 @@ CREATE POLICY "item_menu_groups_delete_roles"
   ON public.item_menu_groups FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
 
 -- =============================================================
+-- 10. DEFAULT MODIFIER OPTION PER ASSIGNMENT
+--     Foodics' products-modifiers export carries default_options
+--     (e.g. Flat White defaults to LOW FAT milk, Iced Americano to a
+--     Paper cup). The picker pre-selects it so the cashier only taps
+--     when the customer deviates.
+-- =============================================================
+ALTER TABLE public.item_modifier_groups
+  ADD COLUMN IF NOT EXISTS default_option_id uuid references public.modifier_options(id) on delete set null;
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that

@@ -222,7 +222,8 @@ async function loadAll() {
   state.modGroups      = (modGroupsR?.data  || []).map(mapModGroupFromDb);
   state.modOptions     = (modOptionsR?.data || []).map(mapModOptionFromDb);
   state.itemModGroups  = (itemModsR?.data   || []).map(r => ({ itemId: r.item_id, groupId: r.group_id,
-    minSelect: Number(r.min_select) || 0, maxSelect: Math.max(1, Number(r.max_select) || 1) }));
+    minSelect: Number(r.min_select) || 0, maxSelect: Math.max(1, Number(r.max_select) || 1),
+    defaultOptionId: r.default_option_id || null }));
   state.menuGroups     = (menuGroupsR?.data || []).map(r => ({ id: r.id, name: r.name || '', active: !!r.active }));
   state.itemMenuGroups = (itemMenuGroupsR?.data || []).map(r => ({ itemId: r.item_id, groupId: r.group_id }));
 }
@@ -471,6 +472,7 @@ function itemModifierGroups(itemId) {
       const g = state.modGroups.find(x => x.id === a.groupId && x.active);
       if (!g) return null;
       return { ...g, minSelect: a.minSelect ?? (g.required ? 1 : 0), maxSelect: a.maxSelect || 1,
+        defaultOptionId: a.defaultOptionId || null,
         options: state.modOptions.filter(o => o.groupId === g.id && o.active).sort((x,y) => x.sortOrder - y.sortOrder) };
     })
     .filter(g => g && g.options.length)
@@ -499,11 +501,14 @@ function addToCart(itemId) {
         ${g.maxSelect > 1 ? `<span class="text-slate-400 normal-case">(up to ${g.maxSelect})</span>` : ''}
       </div>
       <div class="flex gap-1.5 flex-wrap" id="pick-${g.id}">
-        ${g.options.map(o => `
+        ${g.options.map(o => {
+          const isDefault = g.defaultOptionId === o.id;
+          return `
           <button type="button" onclick="pickOption('${g.id}','${o.id}',${g.maxSelect})" id="opt-${o.id}"
-            class="px-3 py-2 rounded-xl text-sm font-semibold border bg-white text-slate-600 border-slate-200">
-            ${escapeHTML(o.nameEn)}${o.nameAr ? ` <span dir="rtl" class="text-xs">${escapeHTML(o.nameAr)}</span>` : ''}${o.priceDelta ? ` <span class="text-brand-700">+${fmtMoney(o.priceDelta)}</span>` : ''}
-          </button>`).join('')}
+            class="px-3 py-2 rounded-xl text-sm font-semibold border ${isDefault ? 'bg-brand-700 text-white border-brand-700' : 'bg-white text-slate-600 border-slate-200'}">
+            ${escapeHTML(o.nameEn)}${o.nameAr ? ` <span dir="rtl" class="text-xs">${escapeHTML(o.nameAr)}</span>` : ''}${o.priceDelta ? ` <span class="${isDefault ? 'text-brand-100' : 'text-brand-700'}">+${fmtMoney(o.priceDelta)}</span>` : ''}
+          </button>`;
+        }).join('')}
       </div>
     </div>`).join('');
   openModal(it.nameEn + (it.nameAr ? ' — ' + it.nameAr : ''), body, async () => {
@@ -516,8 +521,13 @@ function addToCart(itemId) {
     return true;
   }, { saveLabel: 'Add to order' });
   // AFTER openModal — its internal closeModal() wipes _pickerSel, so
-  // initializing it earlier leaves taps writing into null.
+  // initializing it earlier leaves taps writing into null. Defaults
+  // (e.g. Flat White -> LOW FAT milk) start pre-selected.
   _pickerSel = {};
+  groups.forEach(g => {
+    const d = g.defaultOptionId && g.options.find(o => o.id === g.defaultOptionId);
+    if (d) _pickerSel[g.id] = [d];
+  });
 }
 function pickOption(groupId, optionId, maxSelect = 1) {
   if (!_pickerSel) _pickerSel = {};
@@ -1266,9 +1276,10 @@ function renderItemProfile(id) {
             const g = state.modGroups.find(x => x.id === a.groupId);
             if (!g) return '';
             const opts = state.modOptions.filter(o => o.groupId === g.id && o.active);
+            const dflt = a.defaultOptionId && state.modOptions.find(o => o.id === a.defaultOptionId);
             return `
             <tr>
-              <td class="px-5 py-2.5 font-medium">${escapeHTML(g.nameEn)}${g.nameAr ? ` <span dir="rtl" class="text-slate-400 text-xs">${escapeHTML(g.nameAr)}</span>` : ''}${a.minSelect >= 1 ? ' <span class="badge badge-amber">Required</span>' : ''}</td>
+              <td class="px-5 py-2.5 font-medium">${escapeHTML(g.nameEn)}${g.nameAr ? ` <span dir="rtl" class="text-slate-400 text-xs">${escapeHTML(g.nameAr)}</span>` : ''}${a.minSelect >= 1 ? ' <span class="badge badge-amber">Required</span>' : ''}${dflt ? ` <span class="badge badge-slate">default: ${escapeHTML(dflt.nameEn)}</span>` : ''}</td>
               <td class="px-3 py-2.5 text-center tabular-nums">${a.minSelect}</td>
               <td class="px-3 py-2.5 text-center tabular-nums">${a.maxSelect}</td>
               <td class="px-3 py-2.5 text-xs text-slate-500">${opts.slice(0, 4).map(o => escapeHTML(o.nameEn)).join(', ')}${opts.length > 4 ? ` +${opts.length - 4}` : ''}</td>
