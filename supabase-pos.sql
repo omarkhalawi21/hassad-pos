@@ -1,17 +1,17 @@
 -- ============================================================
--- HASSAD POS — schema + RLS source of truth
+-- HASSAD POS -- schema + RLS source of truth
 --
 -- Rules (same discipline as the Hassad HR app):
---   • Append-only and numbered: new schema goes in a new numbered
+--   * Append-only and numbered: new schema goes in a new numbered
 --     block at the end, before the DONE marker. Never rewrite
 --     earlier blocks.
---   • Fully idempotent: CREATE TABLE IF NOT EXISTS, CREATE OR
+--   * Fully idempotent: CREATE TABLE IF NOT EXISTS, CREATE OR
 --     REPLACE, drop-then-create policies in DO $$ loops, seeds
 --     guarded by WHERE NOT EXISTS. Re-running the whole file on a
 --     partially-migrated DB is safe.
---   • Running this file is MANUAL: paste into the Supabase SQL
+--   * Running this file is MANUAL: paste into the Supabase SQL
 --     editor. Merging a PR ships only frontend.
---   • After running, execute the diagnostic at the bottom —
+--   * After running, execute the diagnostic at the bottom --
 --     "Success. No rows returned" from the DDL proves nothing.
 --
 -- Security model: the publishable key ships in index.html; that is
@@ -20,11 +20,11 @@
 
 -- =============================================================
 -- 1. STAFF + ROLE HELPERS
---    Roles: admin (owner — everything), manager (branch manager —
+--    Roles: admin (owner -- everything), manager (branch manager --
 --    menu + reports for their branch), cashier (POS console only,
 --    locked to their branch). staff.user_id links to auth.users
---    with SET-ONCE semantics (NULL→UUID allowed, any other change
---    blocked) — the HR app learned the hard way that a blanket
+--    with SET-ONCE semantics (NULL->UUID allowed, any other change
+--    blocked) -- the HR app learned the hard way that a blanket
 --    "immutable" trigger breaks the auth-signup linker.
 -- =============================================================
 CREATE TABLE IF NOT EXISTS public.staff (
@@ -42,40 +42,38 @@ CREATE TABLE IF NOT EXISTS public.staff (
 );
 
 CREATE OR REPLACE FUNCTION public.is_admin()
-RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $fn$
   SELECT EXISTS (
     SELECT 1 FROM public.staff
     WHERE user_id = auth.uid() AND role = 'admin' AND active
   );
-$$;
+$fn$;
 
 CREATE OR REPLACE FUNCTION public.has_role(roles text[])
-RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $fn$
   SELECT EXISTS (
     SELECT 1 FROM public.staff
     WHERE user_id = auth.uid() AND role = ANY(roles) AND active
   );
-$$;
+$fn$;
 
 -- Current staff row's branch (NULL for admins without a branch).
 CREATE OR REPLACE FUNCTION public.my_branch_id()
-RETURNS uuid LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+RETURNS uuid LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $fn$
   SELECT branch_id FROM public.staff WHERE user_id = auth.uid() AND active;
-$$;
+$fn$;
 
 -- Link a fresh auth.users signup to its pre-created staff row by
--- email (case-insensitive — auth lowercases, rows may not). Two paths:
+-- email (case-insensitive -- auth lowercases, rows may not). Two paths:
 --   1. BOOTSTRAP: the very first auth user on an empty staff table
 --      becomes the admin (do this signup yourself before anyone else).
---   2. LINK: admin pre-created the staff row → NULL→UUID set-once link.
+--   2. LINK: admin pre-created the staff row -> NULL->UUID set-once link.
 -- Unknown emails get no row: POS accounts are provisioned by the
 -- admin first; random signups stay locked out by RLS.
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE is_first boolean;
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $fn$
 BEGIN
-  SELECT NOT EXISTS (SELECT 1 FROM public.staff) INTO is_first;
-  IF is_first THEN
+  IF NOT EXISTS (SELECT 1 FROM public.staff) THEN
     INSERT INTO public.staff (user_id, email, first_name, last_name, role, active)
     VALUES (NEW.id, lower(NEW.email),
             coalesce(NEW.raw_user_meta_data->>'first_name',''),
@@ -88,7 +86,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$;
+$fn$;
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
@@ -96,9 +94,9 @@ CREATE TRIGGER on_auth_user_created
 
 -- Set-once user_id + self-role-change block.
 CREATE OR REPLACE FUNCTION public.enforce_staff_update_rules()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $fn$
 BEGIN
-  -- user_id: NULL→UUID allowed (linker); UUID→anything blocked.
+  -- user_id: NULL->UUID allowed (linker); UUID->anything blocked.
   IF OLD.user_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
     RAISE EXCEPTION 'staff.user_id is set-once';
   END IF;
@@ -109,7 +107,7 @@ BEGIN
   NEW.updated_at = now();
   RETURN NEW;
 END;
-$$;
+$fn$;
 DROP TRIGGER IF EXISTS enforce_staff_update_rules_trigger ON public.staff;
 CREATE TRIGGER enforce_staff_update_rules_trigger
   BEFORE UPDATE ON public.staff
@@ -150,8 +148,8 @@ CREATE TABLE IF NOT EXISTS public.pos_settings (
   cr_number         text not null default '7021976688',
   currency          text not null default 'SAR',
   vat_rate          numeric(5,2) not null default 15.00,
-  receipt_footer_en text not null default 'Thank you — every cup begins with the harvest.',
-  receipt_footer_ar text not null default 'شكراً لكم — كل فنجان يبدأ من الحصاد.',
+  receipt_footer_en text not null default 'Thank you -- every cup begins with the harvest.',
+  receipt_footer_ar text not null default 'شكراً لكم -- كل فنجان يبدأ من الحصاد.',
   updated_at        timestamptz not null default now()
 );
 INSERT INTO public.pos_settings (company_name)
@@ -209,7 +207,7 @@ CREATE POLICY "branches_delete_admin"
   ON public.branches FOR DELETE TO authenticated USING (public.is_admin());
 
 -- =============================================================
--- 3. MENU — categories, items, per-branch availability
+-- 3. MENU -- categories, items, per-branch availability
 --    Prices are VAT-INCLUSIVE (KSA retail convention). The VAT
 --    portion is derived at checkout: total * rate / (100 + rate).
 -- =============================================================
@@ -290,11 +288,11 @@ CREATE POLICY "menu_item_branch_off_delete_roles"
 -- 4. ORDERS + LINES + PAYMENTS
 --    order_no restarts per branch per business day (receipt-friendly
 --    "#47"), assigned by trigger under UNIQUE(branch_id,
---    business_date, order_no) — concurrent cashiers on one branch
+--    business_date, order_no) -- concurrent cashiers on one branch
 --    retry in the app on unique violation (rare at coffee volume).
 --    Cashiers write orders ONLY for their own branch; snapshots of
 --    item name + price live on the line so menu edits never rewrite
---    history. Payments: sum(amount) must equal orders.total —
+--    history. Payments: sum(amount) must equal orders.total --
 --    enforced in the app; the DB keeps method sanity.
 -- =============================================================
 CREATE TABLE IF NOT EXISTS public.orders (
@@ -316,7 +314,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS orders_branch_day_no_idx
 CREATE INDEX IF NOT EXISTS orders_created_idx ON public.orders(created_at DESC);
 
 CREATE OR REPLACE FUNCTION public.assign_order_no()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $fn$
 BEGIN
   IF NEW.order_no IS NULL THEN
     SELECT coalesce(max(order_no), 0) + 1 INTO NEW.order_no
@@ -325,7 +323,7 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-$$;
+$fn$;
 DROP TRIGGER IF EXISTS assign_order_no_trigger ON public.orders;
 CREATE TRIGGER assign_order_no_trigger
   BEFORE INSERT ON public.orders
@@ -373,7 +371,7 @@ CREATE POLICY "orders_select_scoped"
   ON public.orders FOR SELECT TO authenticated
   USING (public.has_role(ARRAY['admin','manager']) OR branch_id = public.my_branch_id());
 -- Writes: any active staff may create an order, but ONLY for their
--- own branch — admins/managers may create for any branch.
+-- own branch -- admins/managers may create for any branch.
 CREATE POLICY "orders_insert_scoped"
   ON public.orders FOR INSERT TO authenticated
   WITH CHECK (
@@ -381,7 +379,7 @@ CREATE POLICY "orders_insert_scoped"
     OR (public.has_role(ARRAY['cashier']) AND branch_id = public.my_branch_id())
   );
 -- Voiding = UPDATE status; admin/manager only. Order rows are never
--- deleted — voided orders keep the audit trail.
+-- deleted -- voided orders keep the audit trail.
 CREATE POLICY "orders_update_roles"
   ON public.orders FOR UPDATE TO authenticated
   USING (public.has_role(ARRAY['admin','manager']))
@@ -420,7 +418,7 @@ CREATE POLICY "order_payments_delete_admin"
 -- =============================================================
 -- DONE.
 --
--- Diagnostic — run after pasting; expect one row of counts that
+-- Diagnostic -- run after pasting; expect one row of counts that
 -- match: 9 tables / 32+ policies / 3 branches / 1 settings row.
 --
 --   SELECT
