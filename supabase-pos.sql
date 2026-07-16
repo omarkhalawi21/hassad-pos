@@ -557,6 +557,90 @@ CREATE POLICY "shift_movements_delete_admin"
   ON public.shift_movements FOR DELETE TO authenticated USING (public.is_admin());
 
 -- =============================================================
+-- 8. MODIFIERS + AGGREGATOR TENDERS (from the Foodics exports)
+--    Modifier groups ("Hot or Iced", "MILK", "EXTRA SHOT") attach to
+--    menu items; the POS prompts at tap-time. Options carry a price
+--    delta (VAT-inclusive, like item prices). The chosen options are
+--    SNAPSHOTTED into order_items.modifiers (jsonb) so menu edits
+--    never rewrite order history. Payment methods gain keeta / ninja
+--    / koinz -- aggregator orders are keyed in and settled to their
+--    tender so reports reconcile with aggregator payouts (exactly how
+--    the team uses Foodics today).
+-- =============================================================
+CREATE TABLE IF NOT EXISTS public.modifier_groups (
+  id          uuid primary key default gen_random_uuid(),
+  reference   text,
+  name_en     text not null,
+  name_ar     text not null default '',
+  required    boolean not null default false,  -- must pick an option to add the item
+  sort_order  int not null default 0,
+  active      boolean not null default true
+);
+CREATE TABLE IF NOT EXISTS public.modifier_options (
+  id          uuid primary key default gen_random_uuid(),
+  group_id    uuid not null references public.modifier_groups(id) on delete cascade,
+  name_en     text not null,
+  name_ar     text not null default '',
+  price_delta numeric(12,2) not null default 0,  -- VAT-inclusive, added to item price
+  sku         text,
+  sort_order  int not null default 0,
+  active      boolean not null default true
+);
+CREATE INDEX IF NOT EXISTS modifier_options_group_idx ON public.modifier_options(group_id);
+CREATE TABLE IF NOT EXISTS public.item_modifier_groups (
+  item_id   uuid not null references public.menu_items(id) on delete cascade,
+  group_id  uuid not null references public.modifier_groups(id) on delete cascade,
+  PRIMARY KEY (item_id, group_id)
+);
+
+ALTER TABLE public.order_items ADD COLUMN IF NOT EXISTS modifiers jsonb;
+
+ALTER TABLE public.order_payments DROP CONSTRAINT IF EXISTS order_payments_method_check;
+ALTER TABLE public.order_payments ADD CONSTRAINT order_payments_method_check
+  CHECK (method IN ('cash','mada','card','stc_pay','keeta','ninja','koinz','other'));
+
+ALTER TABLE public.modifier_groups      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.modifier_options     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_modifier_groups ENABLE ROW LEVEL SECURITY;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT schemaname, tablename, policyname FROM pg_policies
+           WHERE schemaname='public'
+             AND tablename IN ('modifier_groups','modifier_options','item_modifier_groups') LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', r.policyname, r.schemaname, r.tablename);
+  END LOOP;
+END $$;
+-- Menu-shaped policies: all signed-in staff read, admin/manager write.
+CREATE POLICY "modifier_groups_select_authenticated"
+  ON public.modifier_groups FOR SELECT TO authenticated USING (true);
+CREATE POLICY "modifier_groups_insert_roles"
+  ON public.modifier_groups FOR INSERT TO authenticated WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "modifier_groups_update_roles"
+  ON public.modifier_groups FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "modifier_groups_delete_roles"
+  ON public.modifier_groups FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "modifier_options_select_authenticated"
+  ON public.modifier_options FOR SELECT TO authenticated USING (true);
+CREATE POLICY "modifier_options_insert_roles"
+  ON public.modifier_options FOR INSERT TO authenticated WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "modifier_options_update_roles"
+  ON public.modifier_options FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "modifier_options_delete_roles"
+  ON public.modifier_options FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "item_modifier_groups_select_authenticated"
+  ON public.item_modifier_groups FOR SELECT TO authenticated USING (true);
+CREATE POLICY "item_modifier_groups_insert_roles"
+  ON public.item_modifier_groups FOR INSERT TO authenticated WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "item_modifier_groups_update_roles"
+  ON public.item_modifier_groups FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "item_modifier_groups_delete_roles"
+  ON public.item_modifier_groups FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that

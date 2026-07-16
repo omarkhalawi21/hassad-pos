@@ -97,6 +97,7 @@ function emptyState() {
     settings: { companyName:'Hassad Coffee Roasters', companyNameAr:'', vatNumber:'', crNumber:'', currency:'SAR', vatRate:15, receiptFooterEn:'', receiptFooterAr:'' },
     settingsId: null,
     branches: [], staff: [], categories: [], items: [], branchOff: [],
+    modGroups: [], modOptions: [], itemModGroups: [],  // [{itemId, groupId}]
     orders: [],           // capped recent window (today + last 7 days)
     shifts: [],           // open shifts + last 7 days of closed ones
     shiftMovements: [],   // drawer movements for the loaded shifts window
@@ -128,6 +129,14 @@ function mapShiftFromDb(r) {
     countedCash: r.counted_cash == null ? null : Number(r.counted_cash),
     overShort: r.over_short == null ? null : Number(r.over_short), notes: r.notes || '' };
 }
+function mapModGroupFromDb(r) {
+  return { id: r.id, reference: r.reference || '', nameEn: r.name_en || '', nameAr: r.name_ar || '',
+    required: !!r.required, sortOrder: Number(r.sort_order) || 0, active: !!r.active };
+}
+function mapModOptionFromDb(r) {
+  return { id: r.id, groupId: r.group_id, nameEn: r.name_en || '', nameAr: r.name_ar || '',
+    priceDelta: Number(r.price_delta) || 0, sku: r.sku || '', sortOrder: Number(r.sort_order) || 0, active: !!r.active };
+}
 function mapShiftMovementFromDb(r) {
   return { id: r.id, shiftId: r.shift_id, type: r.type, amount: Number(r.amount) || 0,
     reason: r.reason || '', notes: r.notes || '', createdBy: r.created_by, createdAt: r.created_at };
@@ -152,7 +161,8 @@ function mapOrderFromDb(r) {
 const ORDER_TYPES = { pickup: 'Pickup', dine_in: 'Dine-in', delivery: 'Delivery', drive_thru: 'Drive-thru' };
 function mapOrderItemFromDb(r) {
   return { id: r.id, orderId: r.order_id, itemId: r.item_id, nameEn: r.name_en || '', nameAr: r.name_ar || '',
-    unitPrice: Number(r.unit_price) || 0, qty: Number(r.qty) || 0, lineTotal: Number(r.line_total) || 0 };
+    unitPrice: Number(r.unit_price) || 0, qty: Number(r.qty) || 0, lineTotal: Number(r.line_total) || 0,
+    modifiers: Array.isArray(r.modifiers) ? r.modifiers : [] };
 }
 function mapPaymentFromDb(r) {
   return { id: r.id, orderId: r.order_id, method: r.method || 'cash', amount: Number(r.amount) || 0,
@@ -174,7 +184,7 @@ function staffName(id) { const s = state.staff.find(x => x.id === id); return s 
 /* -------------------- DATA LOAD -------------------- */
 async function loadAll() {
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR] = await Promise.all([
+  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR] = await Promise.all([
     sb.from('pos_settings').select('*').limit(1).maybeSingle(),
     sb.from('branches').select('*').order('name'),
     sb.from('staff').select('*').order('first_name'),
@@ -193,6 +203,9 @@ async function loadAll() {
     sb.from('shift_movements').select('*')
       .gte('created_at', weekAgo.toISOString())
       .order('created_at', { ascending: false }).limit(500),
+    sb.from('modifier_groups').select('*').order('sort_order'),
+    sb.from('modifier_options').select('*').order('sort_order'),
+    sb.from('item_modifier_groups').select('*'),
   ]);
   if (settingsR.data) { const s = mapSettingsFromDb(settingsR.data); state.settingsId = s._id; state.settings = s; }
   state.branches   = (branchesR.data   || []).map(mapBranchFromDb);
@@ -203,6 +216,9 @@ async function loadAll() {
   state.orders     = (ordersR.data     || []).map(mapOrderFromDb);
   state.shifts     = (shiftsR?.data    || []).map(mapShiftFromDb);
   state.shiftMovements = (movementsR?.data || []).map(mapShiftMovementFromDb);
+  state.modGroups      = (modGroupsR?.data  || []).map(mapModGroupFromDb);
+  state.modOptions     = (modOptionsR?.data || []).map(mapModOptionFromDb);
+  state.itemModGroups  = (itemModsR?.data   || []).map(r => ({ itemId: r.item_id, groupId: r.group_id }));
 }
 async function loadOrderDetail(orderId) {
   if (state.orderDetailCache[orderId]) return state.orderDetailCache[orderId];
@@ -396,6 +412,7 @@ function closeModal() {
   modalOnSave = null;
   _checkoutSplit = null; // transient checkout state never bleeds into the next modal
   if (typeof _itemPhoto !== 'undefined') _itemPhoto = undefined;
+  if (typeof _pickerSel !== 'undefined') _pickerSel = null;
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('modal-root')) closeModal(); });
 
@@ -435,17 +452,68 @@ function cartTotals() {
   const vat = vatPortion(total, state.settings.vatRate);
   return { gross, discount, total, vat, subtotal: total - vat };
 }
-function addToCart(itemId) {
-  const it = state.items.find(i => i.id === itemId); if (!it) return;
-  const line = posCart.find(l => l.itemId === itemId);
+// Active modifier groups assigned to an item (each with its active options).
+function itemModifierGroups(itemId) {
+  const gids = state.itemModGroups.filter(x => x.itemId === itemId).map(x => x.groupId);
+  return state.modGroups
+    .filter(g => g.active && gids.includes(g.id))
+    .map(g => ({ ...g, options: state.modOptions.filter(o => o.groupId === g.id && o.active).sort((a,b) => a.sortOrder - b.sortOrder) }))
+    .filter(g => g.options.length)
+    .sort((a,b) => a.sortOrder - b.sortOrder);
+}
+function pushCartLine(it, mods) {
+  const key = it.id + '|' + mods.map(m => m.id).sort().join(',');
+  const line = posCart.find(l => l.key === key);
   if (line) line.qty += 1;
-  else posCart.push({ itemId: it.id, nameEn: it.nameEn, nameAr: it.nameAr, unitPrice: it.price, qty: 1 });
+  else posCart.push({ key, itemId: it.id, nameEn: it.nameEn, nameAr: it.nameAr,
+    unitPrice: it.price + mods.reduce((s, m) => s + m.priceDelta, 0),
+    modifiers: mods.map(m => ({ id: m.id, nameEn: m.nameEn, nameAr: m.nameAr, priceDelta: m.priceDelta })),
+    qty: 1 });
   render();
 }
-function cartQty(itemId, delta) {
-  const line = posCart.find(l => l.itemId === itemId); if (!line) return;
+let _pickerSel = null; // { groupId: option | null } — reset in closeModal
+function addToCart(itemId) {
+  const it = state.items.find(i => i.id === itemId); if (!it) return;
+  const groups = itemModifierGroups(itemId);
+  if (!groups.length) { pushCartLine(it, []); return; }
+  _pickerSel = {};
+  const body = groups.map(g => `
+    <div class="mb-4">
+      <div class="text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
+        ${escapeHTML(g.nameEn)}${g.nameAr ? ` <span dir="rtl">${escapeHTML(g.nameAr)}</span>` : ''}
+        ${g.required ? '<span class="text-rose-500">*</span>' : ''}
+      </div>
+      <div class="flex gap-1.5 flex-wrap" id="pick-${g.id}">
+        ${g.options.map(o => `
+          <button type="button" onclick="pickOption('${g.id}','${o.id}')" id="opt-${o.id}"
+            class="px-3 py-2 rounded-xl text-sm font-semibold border bg-white text-slate-600 border-slate-200">
+            ${escapeHTML(o.nameEn)}${o.nameAr ? ` <span dir="rtl" class="text-xs">${escapeHTML(o.nameAr)}</span>` : ''}${o.priceDelta ? ` <span class="text-brand-700">+${fmtMoney(o.priceDelta)}</span>` : ''}
+          </button>`).join('')}
+      </div>
+    </div>`).join('');
+  openModal(it.nameEn + (it.nameAr ? ' — ' + it.nameAr : ''), body, async () => {
+    for (const g of groups) {
+      if (g.required && !_pickerSel[g.id]) { toast(`Choose: ${g.nameEn}`, 'error'); return false; }
+    }
+    const mods = groups.map(g => _pickerSel[g.id]).filter(Boolean);
+    pushCartLine(it, mods);
+    return true;
+  }, { saveLabel: 'Add to order' });
+}
+function pickOption(groupId, optionId) {
+  const opt = state.modOptions.find(o => o.id === optionId);
+  // Tap again to unpick (optional groups); picking replaces within the group.
+  const prev = _pickerSel?.[groupId];
+  _pickerSel[groupId] = (prev && prev.id === optionId) ? null : opt;
+  document.querySelectorAll(`#pick-${CSS.escape(groupId)} button`).forEach(b => {
+    const on = _pickerSel[groupId] && b.id === 'opt-' + _pickerSel[groupId].id;
+    b.className = `px-3 py-2 rounded-xl text-sm font-semibold border ${on ? 'bg-brand-700 text-white border-brand-700' : 'bg-white text-slate-600 border-slate-200'}`;
+  });
+}
+function cartQty(idx, delta) {
+  const line = posCart[idx]; if (!line) return;
   line.qty += delta;
-  if (line.qty <= 0) posCart = posCart.filter(l => l !== line);
+  if (line.qty <= 0) posCart.splice(idx, 1);
   render();
 }
 function clearCart() { posCart = []; posDiscount = null; posOrderType = 'pickup'; posOrderNote = ''; render(); }
@@ -548,12 +616,16 @@ function renderPos() {
         </div>
         ${posCart.length === 0 ? '<div class="text-sm text-slate-400 py-8 text-center">Tap items to add them</div>' : `
         <div class="space-y-2 mb-3">
-          ${posCart.map(l => `
+          ${posCart.map((l, idx) => `
             <div class="flex items-center gap-2 text-sm">
-              <div class="flex-1"><div class="font-medium">${escapeHTML(l.nameEn)}</div><div class="text-xs text-slate-400">${fmtMoney(l.unitPrice)} each</div></div>
-              <button onclick="cartQty('${l.itemId}',-1)" class="w-8 h-8 rounded-lg bg-slate-100 font-bold">−</button>
+              <div class="flex-1">
+                <div class="font-medium">${escapeHTML(l.nameEn)}</div>
+                ${(l.modifiers || []).map(m => `<div class="text-xs text-brand-700">+ ${escapeHTML(m.nameEn)}${m.nameAr ? ` <span dir="rtl">${escapeHTML(m.nameAr)}</span>` : ''}${m.priceDelta ? ` (+${fmtMoney(m.priceDelta)})` : ''}</div>`).join('')}
+                <div class="text-xs text-slate-400">${fmtMoney(l.unitPrice)} each</div>
+              </div>
+              <button onclick="cartQty(${idx},-1)" class="w-8 h-8 rounded-lg bg-slate-100 font-bold">−</button>
               <span class="w-6 text-center font-semibold">${l.qty}</span>
-              <button onclick="cartQty('${l.itemId}',1)" class="w-8 h-8 rounded-lg bg-slate-100 font-bold">+</button>
+              <button onclick="cartQty(${idx},1)" class="w-8 h-8 rounded-lg bg-slate-100 font-bold">+</button>
               <span class="w-16 text-end font-semibold">${fmtMoney(l.unitPrice * l.qty)}</span>
             </div>`).join('')}
         </div>
@@ -769,6 +841,8 @@ function openCheckoutModal() {
         <button onclick="checkoutSetMethod('cash')" id="pay-cash" class="btn btn-ghost !py-3">Cash</button>
         <button onclick="checkoutSetMethod('mada')" id="pay-mada" class="btn btn-ghost !py-3">mada</button>
         <button onclick="checkoutSetMethod('split')" id="pay-split" class="btn btn-ghost !py-3">Split</button>
+        <button onclick="checkoutSetMethod('keeta')" id="pay-keeta" class="btn btn-ghost !py-3">KEETA</button>
+        <button onclick="checkoutSetMethod('ninja')" id="pay-ninja" class="btn btn-ghost !py-3">NINJA</button>
       </div>
       <div id="pay-detail"></div>
     </div>`;
@@ -777,7 +851,7 @@ function openCheckoutModal() {
 }
 function checkoutSetMethod(m) {
   _checkoutSplit = { method: m };
-  ['cash','mada','split'].forEach(x => {
+  ['cash','mada','split','keeta','ninja'].forEach(x => {
     const b = $('#pay-' + x); if (!b) return;
     b.classList.toggle('btn-primary', x === m);
     b.classList.toggle('btn-ghost', x !== m);
@@ -791,6 +865,8 @@ function checkoutSetMethod(m) {
       <div id="cash-change" class="text-sm text-slate-600 mt-2 font-semibold">Change: 0.00</div>`;
   } else if (m === 'mada') {
     d.innerHTML = `<div class="bg-slate-50 rounded-xl p-3 text-sm text-slate-600">Process ${fmtMoney(t.total)} on the mada terminal, then complete the order. Card details never enter the POS.</div>`;
+  } else if (m === 'keeta' || m === 'ninja') {
+    d.innerHTML = `<div class="bg-slate-50 rounded-xl p-3 text-sm text-slate-600">Settles ${fmtMoney(t.total)} to the ${m === 'keeta' ? 'KEETA' : 'NINJA'} tender — the aggregator pays it out later; no cash enters the drawer.</div>`;
   } else {
     d.innerHTML = `
       <div class="grid grid-cols-2 gap-3">
@@ -825,8 +901,8 @@ async function saveOrder() {
     const tendered = parseFloat($('#cash-tendered')?.value) || 0;
     if (tendered < t.total - 0.005) { toast('Cash received is less than the total', 'error'); return false; }
     payments = [{ method:'cash', amount: t.total, tendered, change_given: Math.max(0, tendered - t.total) }];
-  } else if (m === 'mada') {
-    payments = [{ method:'mada', amount: t.total }];
+  } else if (m === 'mada' || m === 'keeta' || m === 'ninja') {
+    payments = [{ method: m, amount: t.total }];
   } else {
     const cash = parseFloat($('#split-cash')?.value) || 0;
     const mada = parseFloat($('#split-mada')?.value) || 0;
@@ -859,7 +935,8 @@ async function saveOrder() {
   if (!order) { toast('Could not save the order — try again', 'error'); return false; }
 
   const lineRows = posCart.map(l => ({ order_id: order.id, item_id: l.itemId, name_en: l.nameEn, name_ar: l.nameAr,
-    unit_price: +l.unitPrice.toFixed(2), qty: l.qty, line_total: +(l.unitPrice * l.qty).toFixed(2) }));
+    unit_price: +l.unitPrice.toFixed(2), qty: l.qty, line_total: +(l.unitPrice * l.qty).toFixed(2),
+    modifiers: l.modifiers?.length ? l.modifiers : null }));
   const { error: liErr } = await sb.from('order_items').insert(lineRows);
   if (liErr) { await sb.from('orders').delete().eq('id', order.id); toast(humanizeError(liErr), 'error'); return false; }
   const { error: payErr } = await sb.from('order_payments').insert(payments.map(p => ({ ...p, order_id: order.id })));
@@ -970,7 +1047,7 @@ async function printReceipt(orderId) {
   const detail = await loadOrderDetail(orderId);
   const s = state.settings;
   const qrUrl = zatcaQrDataUrl(order);
-  const payLabel = { cash:'Cash', mada:'mada', card:'Card', stc_pay:'STC Pay', other:'Other' };
+  const payLabel = { cash:'Cash', mada:'mada', card:'Card', stc_pay:'STC Pay', keeta:'KEETA', ninja:'NINJA', koinz:'Koinz', other:'Other' };
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt #${order.orderNo}</title><style>
     @page { size: 80mm auto; margin: 3mm; }
     body { font-family: -apple-system, 'Segoe UI', sans-serif; width: 72mm; margin: 0 auto; font-size: 11px; color: #000; }
@@ -998,7 +1075,8 @@ async function printReceipt(orderId) {
     <hr>
     <table>${detail.items.map(l => `
       <tr><td>${l.qty}× ${escapeHTML(l.nameEn)}${l.nameAr ? ` <span class="ar">${escapeHTML(l.nameAr)}</span>` : ''}</td>
-      <td style="text-align:end">${fmtMoney(l.lineTotal)}</td></tr>`).join('')}
+      <td style="text-align:end">${fmtMoney(l.lineTotal)}</td></tr>
+      ${(l.modifiers || []).map(m => `<tr><td style="padding-inline-start:10px">+ ${escapeHTML(m.nameEn)}${m.nameAr ? ` <span class="ar">${escapeHTML(m.nameAr)}</span>` : ''}</td><td style="text-align:end">${m.priceDelta ? '+' + fmtMoney(m.priceDelta * l.qty) : ''}</td></tr>`).join('')}`).join('')}
     </table>
     <hr>
     ${order.discountAmount > 0 ? `
@@ -1202,6 +1280,14 @@ function openItemModal(id) {
             <label class="flex items-center gap-1.5 text-sm"><input type="checkbox" class="item-branch" value="${b.id}" ${offSet.has(b.id) ? '' : 'checked'}> ${escapeHTML(b.name)}</label>`).join('')}
         </div>
       </div>
+      ${state.modGroups.filter(g => g.active).length ? `
+      <div>
+        <label class="label">Modifier prompts (asked when the cashier taps this item)</label>
+        <div class="flex gap-3 flex-wrap">
+          ${state.modGroups.filter(g => g.active).sort((a,b) => a.sortOrder - b.sortOrder).map(g => `
+            <label class="flex items-center gap-1.5 text-sm"><input type="checkbox" class="item-modgroup" value="${g.id}" ${state.itemModGroups.some(x => x.itemId === id && x.groupId === g.id) ? 'checked' : ''}> ${escapeHTML(g.nameEn)}${g.required ? ' *' : ''}</label>`).join('')}
+        </div>
+      </div>` : ''}
     </div>`, async () => {
     const row = { name_en: $('#item-en').value.trim(), name_ar: $('#item-ar').value.trim(),
       price: parseFloat($('#item-price').value), category_id: $('#item-cat').value,
@@ -1223,6 +1309,10 @@ function openItemModal(id) {
     const offRows = state.branches.filter(b => b.active && !wanted.has(b.id)).map(b => ({ item_id: itemId, branch_id: b.id }));
     await sb.from('menu_item_branch_off').delete().eq('item_id', itemId);
     if (offRows.length) await sb.from('menu_item_branch_off').insert(offRows);
+    // Modifier-group assignments: rewrite for this item.
+    const wantedGroups = [...document.querySelectorAll('.item-modgroup:checked')].map(cb => cb.value);
+    await sb.from('item_modifier_groups').delete().eq('item_id', itemId);
+    if (wantedGroups.length) await sb.from('item_modifier_groups').insert(wantedGroups.map(gid => ({ item_id: itemId, group_id: gid })));
     await loadAll(); render(); toast('Saved', 'success');
   });
 }
