@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; object-src 'none'; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdn.jsdelivr.net; frame-src 'self' blob:; base-uri 'self'; form-action 'self';" />
+<title>Hassad POS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Cairo:wght@400;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tailwind.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" integrity="sha384-GFr3yTh5lJznCbZfpTtXnwboFsxqtTQoeTZCRHhE0579KrRmlCzen5AA8ohaB5ug" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js" integrity="sha384-lQXOAyZwHXE55JFyrOMB7nY2Wv+m5ZWNtJcHrd1rceRQXAYNLak8ukN5TjBTcIwz" crossorigin="anonymous"></script>
+<style>
+  /* Same-specificity overrides load after tailwind.css and win without a rebuild. */
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:.5rem; padding:.55rem 1.1rem; border-radius:.8rem; font-weight:600; font-size:.875rem; cursor:pointer; border:1px solid transparent; transition:all .12s; }
+  .btn-primary { background:#6e4220; color:#fff; } .btn-primary:hover { background:#573419; }
+  .btn-ghost { background:#fff; color:#334155; border-color:#e2e8f0; } .btn-ghost:hover { background:#f8fafc; }
+  .btn-danger { background:#fff; color:#a93838; border-color:#f1d4d4; } .btn-danger:hover { background:#fdf2f2; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .input { width:100%; padding:.55rem .8rem; border:1px solid #e2e8f0; border-radius:.7rem; font-size:.9rem; background:#fff; }
+  .input:focus { outline:2px solid #c9945566; border-color:#c99455; }
+  .label { display:block; font-size:.72rem; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:#64748b; margin-bottom:.3rem; }
+  .tab { padding:.5rem 1rem; font-size:.875rem; font-weight:600; color:#64748b; border-bottom:2px solid transparent; background:none; cursor:pointer; }
+  .tab.active { color:#6e4220; border-bottom-color:#6e4220; }
+  .badge { display:inline-block; padding:.15rem .6rem; border-radius:999px; font-size:.72rem; font-weight:600; }
+  .badge-green { background:#d1fae5; color:#047857; } .badge-red { background:#fee2e2; color:#b91c1c; }
+  .badge-slate { background:#f1f5f9; color:#475569; } .badge-amber { background:#fef3c7; color:#b45309; }
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); color:#fff; padding:.7rem 1.3rem; border-radius:.8rem; font-size:.875rem; font-weight:500; z-index:9999; box-shadow:0 10px 30px rgba(15,23,42,.25); }
+  #modal-root { position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:1000; display:flex; align-items:center; justify-content:center; padding:1rem; }
+  .modal-box { background:#fff; border-radius:1.2rem; width:100%; max-width:640px; max-height:92vh; overflow-y:auto; }
+  .pos-item { transition:transform .06s; } .pos-item:active { transform:scale(.96); }
+</style>
+</head>
+<body class="bg-brand-50 font-sans text-slate-800">
+<div id="app">
+  <div class="min-h-screen flex items-center justify-center">
+    <div class="text-center">
+      <div class="w-14 h-14 rounded-full border-4 border-brand-200 border-t-brand-700 animate-spin mx-auto"></div>
+      <div class="mt-4 text-sm text-slate-500 font-display">Loading…</div>
+    </div>
+  </div>
+</div>
+<script>
+/* ============================================================
+   HASSAD POS — single-file app. Conventions ported from the
+   Hassad HR app; see CLAUDE.md. RLS is the security boundary —
+   every UI gate here is convenience, not protection.
+============================================================ */
+
+/* -------------------- CONFIG -------------------- */
+// Paste the new Supabase project's URL + publishable key here.
+// The publishable key is safe in client source ONLY because RLS
+// is enforced on every table (see supabase-pos.sql).
+const SUPABASE_URL = 'PASTE_SUPABASE_URL_HERE';
+const SUPABASE_KEY = 'PASTE_SUPABASE_PUBLISHABLE_KEY_HERE';
+const sb = (() => {
+  try {
+    if (!/^https:\/\/.+\.supabase\.co$/.test(SUPABASE_URL)) return null; // placeholder → config gate, not a crash
+    return window.supabase?.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true }
+    }) || null;
+  } catch (e) { console.error('Supabase init failed:', e); return null; }
+})();
+
+/* -------------------- HELPERS -------------------- */
+const $ = sel => document.querySelector(sel);
+function escapeHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+function toast(msg, type = 'info') {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.style.background = type === 'error' ? '#b91c1c' : type === 'success' ? '#047857' : '#0f172a';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.transition = 'opacity .2s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 200); }, 2600);
+}
+// Missing-DB-object codes mean a skipped migration, not a bug.
+function humanizeError(err) {
+  const code = err?.code || '';
+  if (['PGRST202','42883','42P01','42703'].includes(code)) return 'Database schema is out of date — run the latest supabase-pos.sql in the SQL editor.';
+  if (code === '42501') return 'You do not have permission for that.';
+  if (code === '23505') return 'That already exists.';
+  return err?.message || 'Something went wrong.';
+}
+function todayISO() { return new Date().toISOString().slice(0, 10); }
+function fmtMoney(n) { return Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmtDateTime(ts) { return ts ? new Date(ts).toLocaleString(undefined, { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '—'; }
+// VAT-inclusive price → contained VAT portion.
+function vatPortion(totalInc, rate) { return totalInc * rate / (100 + rate); }
+
+/* -------------------- STATE + MAPPERS -------------------- */
+function emptyState() {
+  return {
+    session: null,
+    settings: { companyName:'Hassad Coffee Roasters', companyNameAr:'', vatNumber:'', crNumber:'', currency:'SAR', vatRate:15, receiptFooterEn:'', receiptFooterAr:'' },
+    settingsId: null,
+    branches: [], staff: [], categories: [], items: [], branchOff: [],
+    orders: [],           // capped recent window (today + last 7 days)
+    orderDetailCache: {}, // orderId → { items:[], payments:[] } fetched on demand for receipts
+  };
+}
+let state = emptyState();
+
+function mapSettingsFromDb(r) {
+  return { _id: r.id, companyName: r.company_name || '', companyNameAr: r.company_name_ar || '',
+    vatNumber: r.vat_number || '', crNumber: r.cr_number || '', currency: r.currency || 'SAR',
+    vatRate: Number(r.vat_rate) || 15, receiptFooterEn: r.receipt_footer_en || '', receiptFooterAr: r.receipt_footer_ar || '' };
+}
+function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active }; }
+function mapStaffFromDb(r) {
+  return { id: r.id, userId: r.user_id, email: r.email || '', firstName: r.first_name || '', lastName: r.last_name || '',
+    role: r.role || 'cashier', branchId: r.branch_id, active: !!r.active };
+}
+function mapCategoryFromDb(r) { return { id: r.id, nameEn: r.name_en || '', nameAr: r.name_ar || '', sortOrder: Number(r.sort_order) || 0, active: !!r.active }; }
+function mapItemFromDb(r) {
+  return { id: r.id, categoryId: r.category_id, nameEn: r.name_en || '', nameAr: r.name_ar || '',
+    price: Number(r.price) || 0, sku: r.sku || '', sortOrder: Number(r.sort_order) || 0, active: !!r.active };
+}
+function mapOrderFromDb(r) {
+  return { id: r.id, branchId: r.branch_id, businessDate: r.business_date, orderNo: Number(r.order_no) || 0,
+    status: r.status || 'completed', subtotal: Number(r.subtotal) || 0, vatAmount: Number(r.vat_amount) || 0,
+    total: Number(r.total) || 0, cashierId: r.cashier_id, voidReason: r.void_reason || '', createdAt: r.created_at };
+}
+function mapOrderItemFromDb(r) {
+  return { id: r.id, orderId: r.order_id, itemId: r.item_id, nameEn: r.name_en || '', nameAr: r.name_ar || '',
+    unitPrice: Number(r.unit_price) || 0, qty: Number(r.qty) || 0, lineTotal: Number(r.line_total) || 0 };
+}
+function mapPaymentFromDb(r) {
+  return { id: r.id, orderId: r.order_id, method: r.method || 'cash', amount: Number(r.amount) || 0,
+    tendered: r.tendered == null ? null : Number(r.tendered), changeGiven: r.change_given == null ? null : Number(r.change_given) };
+}
+
+/* -------------------- ROLES -------------------- */
+function currentStaff() {
+  if (!state.session) return null;
+  return state.staff.find(s => s.userId === state.session.userId) || null;
+}
+function currentRole() { return currentStaff()?.role || 'none'; }
+function hasRole(...roles) { return roles.includes(currentRole()); }
+function isAdmin() { return currentRole() === 'admin'; }
+function myBranchId() { return currentStaff()?.branchId || null; }
+function branchName(id) { return state.branches.find(b => b.id === id)?.name || '—'; }
+function staffName(id) { const s = state.staff.find(x => x.id === id); return s ? `${s.firstName} ${s.lastName}`.trim() || s.email : '—'; }
+
+/* -------------------- DATA LOAD -------------------- */
+async function loadAll() {
+  const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR] = await Promise.all([
+    sb.from('pos_settings').select('*').limit(1).maybeSingle(),
+    sb.from('branches').select('*').order('name'),
+    sb.from('staff').select('*').order('first_name'),
+    sb.from('menu_categories').select('*').order('sort_order'),
+    sb.from('menu_items').select('*').order('sort_order'),
+    sb.from('menu_item_branch_off').select('*'),
+    // Recent window only — orders grow forever; history beyond this
+    // stays in the DB (reports can query on demand later).
+    sb.from('orders').select('*').gte('business_date', weekAgo.toISOString().slice(0,10))
+      .order('created_at', { ascending: false }).limit(1000),
+  ]);
+  if (settingsR.data) { const s = mapSettingsFromDb(settingsR.data); state.settingsId = s._id; state.settings = s; }
+  state.branches   = (branchesR.data   || []).map(mapBranchFromDb);
+  state.staff      = (staffR.data      || []).map(mapStaffFromDb);
+  state.categories = (categoriesR.data || []).map(mapCategoryFromDb);
+  state.items      = (itemsR.data      || []).map(mapItemFromDb);
+  state.branchOff  = (offR.data        || []).map(r => ({ itemId: r.item_id, branchId: r.branch_id }));
+  state.orders     = (ordersR.data     || []).map(mapOrderFromDb);
+}
+async function loadOrderDetail(orderId) {
+  if (state.orderDetailCache[orderId]) return state.orderDetailCache[orderId];
+  const [itemsR, paysR] = await Promise.all([
+    sb.from('order_items').select('*').eq('order_id', orderId),
+    sb.from('order_payments').select('*').eq('order_id', orderId),
+  ]);
+  const detail = { items: (itemsR.data || []).map(mapOrderItemFromDb), payments: (paysR.data || []).map(mapPaymentFromDb) };
+  state.orderDetailCache[orderId] = detail;
+  return detail;
+}
+
+/* -------------------- AUTH -------------------- */
+async function doLogin() {
+  const email = $('#login-email').value.trim();
+  const password = $('#login-password').value;
+  if (!email || !password) { toast('Email and password required', 'error'); return; }
+  const btn = $('#login-submit'); if (btn) btn.disabled = true;
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (btn) btn.disabled = false;
+  if (error) { toast(error.message || 'Invalid credentials', 'error'); return; }
+  await afterAuth(data.user);
+}
+async function doSignup() {
+  const email = $('#su-email').value.trim();
+  const password = $('#su-password').value;
+  const firstName = $('#su-first').value.trim();
+  const lastName = $('#su-last').value.trim();
+  if (!email || password.length < 6) { toast('Email and a 6+ character password required', 'error'); return; }
+  const { error } = await sb.auth.signUp({ email, password, options: { data: { first_name: firstName, last_name: lastName } } });
+  if (error) { toast(error.message, 'error'); return; }
+  toast('Account created — you can log in now.', 'success');
+  authMode = 'login'; render();
+}
+async function afterAuth(user) {
+  state.session = { userId: user.id, email: user.email, loggedAt: new Date().toISOString() };
+  await loadAll();
+  location.hash = hasRole('cashier') ? '#/pos' : '#/dashboard';
+  render();
+}
+async function logout() {
+  await sb.auth.signOut();
+  state = emptyState();
+  // Shared-tablet hygiene: reset every module-level transient var.
+  posCart = []; posCategoryId = null; _checkoutSplit = null; authMode = 'login';
+  location.hash = '';
+  render();
+}
+
+/* -------------------- ROUTING / SHELL -------------------- */
+const routes = ['dashboard', 'pos', 'orders', 'menu', 'branches', 'staff', 'settings'];
+let authMode = 'login';
+function getRoute() {
+  const h = (location.hash || '').replace(/^#\/?/, '').split('/')[0];
+  return routes.includes(h) ? h : (hasRole('cashier') ? 'pos' : 'dashboard');
+}
+window.addEventListener('hashchange', () => render());
+
+function navItems() {
+  return [
+    { key:'dashboard', label:'Dashboard', show: hasRole('admin','manager') },
+    { key:'pos',       label:'POS',       show: true },
+    { key:'orders',    label:'Orders',    show: true },
+    { key:'menu',      label:'Menu',      show: hasRole('admin','manager') },
+    { key:'branches',  label:'Branches',  show: isAdmin() },
+    { key:'staff',     label:'Staff',     show: isAdmin() },
+    { key:'settings',  label:'Settings',  show: isAdmin() },
+  ].filter(n => n.show);
+}
+
+function render() {
+  try { renderMain(); }
+  catch (e) {
+    console.error('Render error:', e);
+    $('#app').innerHTML = `<div class="min-h-screen flex items-center justify-center p-6"><div class="bg-white rounded-2xl shadow-card p-8 max-w-md text-center">
+      <h2 class="font-display text-xl font-semibold text-slate-900">Something went wrong</h2>
+      <p class="text-sm text-slate-500 mt-2">${escapeHTML(e.message)}</p>
+      <button onclick="location.hash=''; render();" class="btn btn-primary mt-4">Back to safety</button></div></div>`;
+  }
+}
+function renderMain() {
+  const app = $('#app');
+  if (!sb) { app.innerHTML = `<div class="min-h-screen flex items-center justify-center p-6"><div class="bg-white rounded-2xl shadow-card p-8 max-w-md text-center"><h2 class="font-display text-xl font-semibold text-slate-900">Not configured yet</h2><p class="text-sm text-slate-500 mt-2">Set SUPABASE_URL and SUPABASE_KEY in index.html to this project's Supabase credentials (or the CDN failed to load — check the network).</p></div></div>`; return; }
+  if (!state.session) { app.innerHTML = renderLogin(); return; }
+  const me = currentStaff();
+  if (!me || !me.active) { app.innerHTML = renderNoAccessGate(); return; }
+  const route = getRoute();
+  let content = '';
+  switch (route) {
+    case 'pos':       content = renderPos(); break;
+    case 'orders':    content = renderOrders(); break;
+    case 'dashboard': content = hasRole('admin','manager') ? renderDashboard() : renderPos(); break;
+    case 'menu':      content = hasRole('admin','manager') ? renderMenu() : renderPos(); break;
+    case 'branches':  content = isAdmin() ? renderBranches() : renderPos(); break;
+    case 'staff':     content = isAdmin() ? renderStaff() : renderPos(); break;
+    case 'settings':  content = isAdmin() ? renderSettings() : renderPos(); break;
+    default:          content = renderPos();
+  }
+  app.innerHTML = renderShell(content, route);
+}
+
+function renderShell(content, route) {
+  const me = currentStaff();
+  const nav = navItems().map(n => `
+    <a href="#/${n.key}" class="px-3 py-2 rounded-xl text-sm font-semibold ${getRoute()===n.key ? 'bg-brand-700 text-white' : 'text-slate-600 hover:bg-brand-100'}">${escapeHTML(n.label)}</a>`).join('');
+  return `
+    <div class="min-h-screen flex flex-col">
+      <header class="bg-white border-b border-brand-100 px-4 py-2.5 flex items-center gap-3 flex-wrap">
+        <div class="font-display text-lg font-bold text-brand-800">Hassad <span class="text-brand-500">POS</span></div>
+        <nav class="flex gap-1 flex-wrap">${nav}</nav>
+        <div class="ms-auto flex items-center gap-3 text-sm text-slate-500">
+          <span>${escapeHTML(me.firstName || me.email)}${me.branchId ? ` · ${escapeHTML(branchName(me.branchId))}` : ''} <span class="badge badge-slate">${escapeHTML(me.role)}</span></span>
+          <button onclick="logout()" class="btn btn-ghost !py-1.5">Logout</button>
+        </div>
+      </header>
+      <main class="flex-1 p-4 md:p-6 max-w-7xl w-full mx-auto">${content}</main>
+    </div>`;
+}
+
+function renderLogin() {
+  const isSignup = authMode === 'signup';
+  return `
+    <div class="min-h-screen flex items-center justify-center p-6">
+      <div class="bg-white rounded-2xl shadow-pop p-8 w-full max-w-sm">
+        <div class="text-center mb-6">
+          <div class="font-display text-2xl font-bold text-brand-800">Hassad <span class="text-brand-500">POS</span></div>
+          <p class="text-sm text-slate-500 mt-1">${isSignup ? 'Create your account' : 'Sign in to your branch'}</p>
+        </div>
+        ${isSignup ? `
+        <form onsubmit="event.preventDefault(); doSignup();" class="space-y-3">
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="label">First name</label><input id="su-first" class="input"></div>
+            <div><label class="label">Last name</label><input id="su-last" class="input"></div>
+          </div>
+          <div><label class="label">Email</label><input id="su-email" type="email" class="input" required></div>
+          <div><label class="label">Password</label><input id="su-password" type="password" class="input" required minlength="6"></div>
+          <button type="submit" class="btn btn-primary w-full">Create account</button>
+          <p class="text-xs text-slate-400 text-center">Use the email your admin registered for you.</p>
+        </form>
+        <button onclick="authMode='login'; render();" class="btn btn-ghost w-full mt-3">Back to login</button>` : `
+        <form onsubmit="event.preventDefault(); doLogin();" class="space-y-3">
+          <div><label class="label">Email</label><input id="login-email" type="email" class="input" required></div>
+          <div><label class="label">Password</label><input id="login-password" type="password" class="input" required></div>
+          <button id="login-submit" type="submit" class="btn btn-primary w-full">Login</button>
+        </form>
+        <button onclick="authMode='signup'; render();" class="btn btn-ghost w-full mt-3">First time? Create account</button>`}
+      </div>
+    </div>`;
+}
+function renderNoAccessGate() {
+  return `
+    <div class="min-h-screen flex items-center justify-center p-6">
+      <div class="bg-white rounded-2xl shadow-card p-8 max-w-md text-center">
+        <h2 class="font-display text-xl font-semibold text-slate-900">No POS access</h2>
+        <p class="text-sm text-slate-500 mt-2">Your account (${escapeHTML(state.session?.email || '')}) isn't registered as staff, or was deactivated. Ask the admin to add you, then log in again.</p>
+        <button onclick="logout()" class="btn btn-primary mt-4">Logout</button>
+      </div>
+    </div>`;
+}
+
+/* -------------------- MODALS -------------------- */
+let modalOnSave = null;
+function openModal(title, bodyHTML, onSave, opts = {}) {
+  closeModal();
+  modalOnSave = onSave;
+  const root = document.createElement('div');
+  root.id = 'modal-root';
+  root.innerHTML = `
+    <div class="modal-box">
+      <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+        <h3 class="font-display text-lg font-semibold text-slate-900">${escapeHTML(title)}</h3>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+      </div>
+      <div class="p-6">${bodyHTML}</div>
+      <div class="px-6 py-4 border-t border-slate-100 flex justify-end gap-2">
+        <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
+        ${onSave ? `<button id="modal-save" class="btn btn-primary">${escapeHTML(opts.saveLabel || 'Save')}</button>` : ''}
+      </div>
+    </div>`;
+  root.addEventListener('click', e => { if (e.target === root) closeModal(); });
+  document.body.appendChild(root);
+  if (onSave) $('#modal-save').addEventListener('click', async () => {
+    const ok = await modalOnSave();
+    if (ok !== false) closeModal();
+  });
+}
+function closeModal() {
+  document.getElementById('modal-root')?.remove();
+  modalOnSave = null;
+  _checkoutSplit = null; // transient checkout state never bleeds into the next modal
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('modal-root')) closeModal(); });
+
+/* -------------------- POS CONSOLE -------------------- */
+let posCart = [];        // [{itemId, nameEn, nameAr, unitPrice, qty}]
+let posCategoryId = null;
+let _checkoutSplit = null;
+
+function posBranchId() {
+  // Cashiers sell at their branch; admin/manager picks (defaults to first).
+  return myBranchId() || state.branches.find(b => b.active)?.id || null;
+}
+function itemAvailableAt(itemId, branchId) {
+  return !state.branchOff.some(o => o.itemId === itemId && o.branchId === branchId);
+}
+function cartTotals() {
+  const total = posCart.reduce((s, l) => s + l.unitPrice * l.qty, 0);
+  const vat = vatPortion(total, state.settings.vatRate);
+  return { total, vat, subtotal: total - vat };
+}
+function addToCart(itemId) {
+  const it = state.items.find(i => i.id === itemId); if (!it) return;
+  const line = posCart.find(l => l.itemId === itemId);
+  if (line) line.qty += 1;
+  else posCart.push({ itemId: it.id, nameEn: it.nameEn, nameAr: it.nameAr, unitPrice: it.price, qty: 1 });
+  render();
+}
+function cartQty(itemId, delta) {
+  const line = posCart.find(l => l.itemId === itemId); if (!line) return;
+  line.qty += delta;
+  if (line.qty <= 0) posCart = posCart.filter(l => l !== line);
+  render();
+}
+function clearCart() { posCart = []; render(); }
+
+function renderPos() {
+  const branchId = posBranchId();
+  if (!branchId) return `<div class="bg-white rounded-2xl shadow-card p-10 text-center text-slate-500">No active branch. ${isAdmin() ? 'Add one under Branches.' : 'Ask the admin to assign you to a branch.'}</div>`;
+  const cats = state.categories.filter(c => c.active).sort((a,b) => a.sortOrder - b.sortOrder);
+  if (!posCategoryId || !cats.some(c => c.id === posCategoryId)) posCategoryId = cats[0]?.id || null;
+  const items = state.items
+    .filter(i => i.active && i.categoryId === posCategoryId && itemAvailableAt(i.id, branchId))
+    .sort((a,b) => a.sortOrder - b.sortOrder);
+  const t = cartTotals();
+  return `
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="lg:col-span-2">
+        <div class="flex gap-1 overflow-x-auto pb-2 mb-3">
+          ${cats.map(c => `<button onclick="posCategoryId='${c.id}'; render();" class="tab whitespace-nowrap ${posCategoryId===c.id?'active':''}">${escapeHTML(c.nameEn)}</button>`).join('') || '<span class="text-sm text-slate-400">No categories yet — add them under Menu.</span>'}
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
+          ${items.map(i => `
+            <button onclick="addToCart('${i.id}')" class="pos-item bg-white rounded-2xl shadow-card p-4 text-start hover:shadow-pop">
+              <div class="font-semibold text-slate-900 leading-snug">${escapeHTML(i.nameEn)}</div>
+              ${i.nameAr ? `<div class="text-xs text-slate-500 mt-0.5" dir="rtl">${escapeHTML(i.nameAr)}</div>` : ''}
+              <div class="text-brand-700 font-bold mt-2">${fmtMoney(i.price)} <span class="text-xs font-medium">${escapeHTML(state.settings.currency)}</span></div>
+            </button>`).join('') || '<div class="col-span-full text-sm text-slate-400 bg-white rounded-2xl shadow-card p-8 text-center">No items in this category for this branch.</div>'}
+        </div>
+      </div>
+      <div class="bg-white rounded-2xl shadow-card p-4 h-fit lg:sticky lg:top-4">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-display font-semibold text-slate-900">Order — ${escapeHTML(branchName(branchId))}</h3>
+          ${posCart.length ? `<button onclick="clearCart()" class="text-xs text-rose-500 hover:underline">Clear</button>` : ''}
+        </div>
+        ${posCart.length === 0 ? '<div class="text-sm text-slate-400 py-8 text-center">Tap items to add them</div>' : `
+        <div class="space-y-2 mb-3">
+          ${posCart.map(l => `
+            <div class="flex items-center gap-2 text-sm">
+              <div class="flex-1"><div class="font-medium">${escapeHTML(l.nameEn)}</div><div class="text-xs text-slate-400">${fmtMoney(l.unitPrice)} each</div></div>
+              <button onclick="cartQty('${l.itemId}',-1)" class="w-8 h-8 rounded-lg bg-slate-100 font-bold">−</button>
+              <span class="w-6 text-center font-semibold">${l.qty}</span>
+              <button onclick="cartQty('${l.itemId}',1)" class="w-8 h-8 rounded-lg bg-slate-100 font-bold">+</button>
+              <span class="w-16 text-end font-semibold">${fmtMoney(l.unitPrice * l.qty)}</span>
+            </div>`).join('')}
+        </div>
+        <div class="border-t border-slate-100 pt-3 space-y-1 text-sm">
+          <div class="flex justify-between text-slate-500"><span>Subtotal (ex-VAT)</span><span>${fmtMoney(t.subtotal)}</span></div>
+          <div class="flex justify-between text-slate-500"><span>VAT ${state.settings.vatRate}%</span><span>${fmtMoney(t.vat)}</span></div>
+          <div class="flex justify-between font-bold text-lg text-slate-900"><span>Total</span><span>${fmtMoney(t.total)} ${escapeHTML(state.settings.currency)}</span></div>
+        </div>
+        <button onclick="openCheckoutModal()" class="btn btn-primary w-full mt-4 !py-3 !text-base">Charge ${fmtMoney(t.total)}</button>`}
+      </div>
+    </div>`;
+}
+
+/* -------------------- CHECKOUT -------------------- */
+function openCheckoutModal() {
+  if (!posCart.length) return;
+  const t = cartTotals();
+  const body = `
+    <div class="space-y-4">
+      <div class="text-center">
+        <div class="text-xs uppercase tracking-wider text-slate-500 font-semibold">Amount due</div>
+        <div class="font-display text-4xl font-bold text-slate-900 mt-1">${fmtMoney(t.total)} <span class="text-base">${escapeHTML(state.settings.currency)}</span></div>
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <button onclick="checkoutSetMethod('cash')" id="pay-cash" class="btn btn-ghost !py-3">Cash</button>
+        <button onclick="checkoutSetMethod('mada')" id="pay-mada" class="btn btn-ghost !py-3">mada</button>
+        <button onclick="checkoutSetMethod('split')" id="pay-split" class="btn btn-ghost !py-3">Split</button>
+      </div>
+      <div id="pay-detail"></div>
+    </div>`;
+  openModal('Checkout', body, async () => saveOrder(), { saveLabel: 'Complete order' });
+  checkoutSetMethod('cash');
+}
+function checkoutSetMethod(m) {
+  _checkoutSplit = { method: m };
+  ['cash','mada','split'].forEach(x => {
+    const b = $('#pay-' + x); if (!b) return;
+    b.classList.toggle('btn-primary', x === m);
+    b.classList.toggle('btn-ghost', x !== m);
+  });
+  const t = cartTotals();
+  const d = $('#pay-detail'); if (!d) return;
+  if (m === 'cash') {
+    d.innerHTML = `
+      <label class="label">Cash received</label>
+      <input id="cash-tendered" type="number" min="0" step="0.05" class="input !text-lg" value="${t.total.toFixed(2)}" oninput="updateChange()">
+      <div id="cash-change" class="text-sm text-slate-600 mt-2 font-semibold">Change: 0.00</div>`;
+  } else if (m === 'mada') {
+    d.innerHTML = `<div class="bg-slate-50 rounded-xl p-3 text-sm text-slate-600">Process ${fmtMoney(t.total)} on the mada terminal, then complete the order. Card details never enter the POS.</div>`;
+  } else {
+    d.innerHTML = `
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Cash part</label><input id="split-cash" type="number" min="0" step="0.05" class="input" value="0" oninput="updateSplit()"></div>
+        <div><label class="label">mada part</label><input id="split-mada" type="number" min="0" step="0.05" class="input" value="${t.total.toFixed(2)}" oninput="updateSplit()"></div>
+      </div>
+      <div id="split-check" class="text-sm mt-2 font-semibold"></div>`;
+    updateSplit();
+  }
+}
+function updateChange() {
+  const t = cartTotals();
+  const tendered = parseFloat($('#cash-tendered')?.value) || 0;
+  const c = $('#cash-change');
+  if (c) { const ch = tendered - t.total; c.textContent = 'Change: ' + fmtMoney(Math.max(0, ch)); c.style.color = ch < 0 ? '#b91c1c' : ''; }
+}
+function updateSplit() {
+  const t = cartTotals();
+  const cash = parseFloat($('#split-cash')?.value) || 0;
+  const mada = parseFloat($('#split-mada')?.value) || 0;
+  const el = $('#split-check'); if (!el) return;
+  const diff = t.total - cash - mada;
+  el.textContent = Math.abs(diff) < 0.005 ? '✓ Adds up' : (diff > 0 ? `${fmtMoney(diff)} short` : `${fmtMoney(-diff)} over`);
+  el.style.color = Math.abs(diff) < 0.005 ? '#047857' : '#b91c1c';
+}
+
+async function saveOrder() {
+  const t = cartTotals();
+  const m = _checkoutSplit?.method || 'cash';
+  let payments = [];
+  if (m === 'cash') {
+    const tendered = parseFloat($('#cash-tendered')?.value) || 0;
+    if (tendered < t.total - 0.005) { toast('Cash received is less than the total', 'error'); return false; }
+    payments = [{ method:'cash', amount: t.total, tendered, change_given: Math.max(0, tendered - t.total) }];
+  } else if (m === 'mada') {
+    payments = [{ method:'mada', amount: t.total }];
+  } else {
+    const cash = parseFloat($('#split-cash')?.value) || 0;
+    const mada = parseFloat($('#split-mada')?.value) || 0;
+    if (Math.abs(cash + mada - t.total) > 0.005) { toast('Split amounts must add up to the total', 'error'); return false; }
+    payments = [];
+    if (cash > 0) payments.push({ method:'cash', amount: cash });
+    if (mada > 0) payments.push({ method:'mada', amount: mada });
+  }
+  const branchId = posBranchId();
+  const me = currentStaff();
+  const orderRow = { branch_id: branchId, business_date: todayISO(), status: 'completed',
+    subtotal: +t.subtotal.toFixed(2), vat_amount: +t.vat.toFixed(2), total: +t.total.toFixed(2), cashier_id: me?.id || null };
+
+  // Insert; the DB trigger assigns order_no. Concurrent cashiers on one
+  // branch can collide on the unique (branch, date, no) — retry once.
+  let order = null;
+  for (let attempt = 0; attempt < 2 && !order; attempt++) {
+    const { data, error } = await sb.from('orders').insert(orderRow).select().single();
+    if (error) {
+      if (error.code === '23505' && attempt === 0) continue;
+      toast(humanizeError(error), 'error'); return false;
+    }
+    order = data;
+  }
+  if (!order) { toast('Could not save the order — try again', 'error'); return false; }
+
+  const lineRows = posCart.map(l => ({ order_id: order.id, item_id: l.itemId, name_en: l.nameEn, name_ar: l.nameAr,
+    unit_price: +l.unitPrice.toFixed(2), qty: l.qty, line_total: +(l.unitPrice * l.qty).toFixed(2) }));
+  const { error: liErr } = await sb.from('order_items').insert(lineRows);
+  if (liErr) { await sb.from('orders').delete().eq('id', order.id); toast(humanizeError(liErr), 'error'); return false; }
+  const { error: payErr } = await sb.from('order_payments').insert(payments.map(p => ({ ...p, order_id: order.id })));
+  if (payErr) { toast('Order saved but payment record failed: ' + humanizeError(payErr), 'error'); }
+
+  const mapped = mapOrderFromDb(order);
+  state.orders.unshift(mapped);
+  state.orderDetailCache[order.id] = { items: lineRows.map(mapOrderItemFromDb), payments: payments.map((p,i) => mapPaymentFromDb({ ...p, id:'tmp'+i, order_id: order.id })) };
+  posCart = [];
+  render();
+  toast(`Order #${mapped.orderNo} completed`, 'success');
+  printReceipt(mapped.id);
+  return true;
+}
+
+/* -------------------- ORDERS LOG -------------------- */
+function renderOrders() {
+  const mine = myBranchId();
+  const list = state.orders.filter(o => hasRole('admin','manager') || o.branchId === mine);
+  return `
+    <div class="bg-white rounded-2xl shadow-card overflow-hidden">
+      <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+        <h3 class="font-display text-lg font-semibold text-slate-900">Orders <span class="text-sm font-normal text-slate-400">last 7 days · ${list.length}</span></h3>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full text-sm">
+        <thead><tr class="text-start text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
+          <th class="text-start px-4 py-2.5">#</th><th class="text-start px-4 py-2.5">Time</th><th class="text-start px-4 py-2.5">Branch</th>
+          <th class="text-start px-4 py-2.5">Cashier</th><th class="text-end px-4 py-2.5">Total</th><th class="text-start px-4 py-2.5">Status</th><th class="px-4 py-2.5"></th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${list.map(o => `
+            <tr class="hover:bg-slate-50 ${o.status==='void' ? 'opacity-50' : ''}">
+              <td class="px-4 py-2.5 font-bold text-brand-700">#${o.orderNo}</td>
+              <td class="px-4 py-2.5 text-slate-600">${fmtDateTime(o.createdAt)}</td>
+              <td class="px-4 py-2.5">${escapeHTML(branchName(o.branchId))}</td>
+              <td class="px-4 py-2.5 text-slate-600">${escapeHTML(staffName(o.cashierId))}</td>
+              <td class="px-4 py-2.5 text-end font-semibold">${fmtMoney(o.total)}</td>
+              <td class="px-4 py-2.5">${o.status==='void' ? '<span class="badge badge-red">Void</span>' : '<span class="badge badge-green">Completed</span>'}</td>
+              <td class="px-4 py-2.5 text-end whitespace-nowrap">
+                <button onclick="printReceipt('${o.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Receipt</button>
+                ${hasRole('admin','manager') && o.status!=='void' ? `<button onclick="voidOrder('${o.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Void</button>` : ''}
+              </td>
+            </tr>`).join('') || '<tr><td colspan="7" class="text-center text-slate-400 py-10">No orders yet.</td></tr>'}
+        </tbody></table></div>
+    </div>`;
+}
+async function voidOrder(orderId) {
+  const reason = prompt('Void reason (required):');
+  if (!reason?.trim()) return;
+  const { error } = await sb.from('orders').update({ status:'void', void_reason: reason.trim() }).eq('id', orderId);
+  if (error) { toast(humanizeError(error), 'error'); return; }
+  const o = state.orders.find(x => x.id === orderId);
+  if (o) { o.status = 'void'; o.voidReason = reason.trim(); }
+  render(); toast('Order voided', 'success');
+}
+
+/* -------------------- RECEIPT + ZATCA QR -------------------- */
+// ZATCA Phase-1 simplified invoice QR: TLV tags 1-5 (seller legal name,
+// VAT number, ISO timestamp, total incl VAT, VAT amount), base64, QR.
+// Ported from the HR app's B2B invoice module. Returns '' if the QR
+// lib failed to load — the receipt prints without a QR, never crashes.
+function zatcaQrDataUrl(order) {
+  if (typeof qrcode === 'undefined') return '';
+  try {
+    const enc = new TextEncoder();
+    const tlv = (tag, str) => { const b = enc.encode(String(str)); return [tag, b.length, ...b]; };
+    const bytes = [
+      ...tlv(1, state.settings.companyName),
+      ...tlv(2, state.settings.vatNumber),
+      ...tlv(3, new Date(order.createdAt).toISOString()),
+      ...tlv(4, Number(order.total).toFixed(2)),
+      ...tlv(5, Number(order.vatAmount).toFixed(2)),
+    ];
+    const b64 = btoa(String.fromCharCode.apply(null, bytes));
+    const qr = qrcode(0, 'M');
+    qr.addData(b64); qr.make();
+    return qr.createDataURL(4, 8);
+  } catch (e) { console.error('ZATCA QR failed:', e); return ''; }
+}
+// Blob-URL popup — document.write into about:blank saves BLANK PDFs in
+// Safari (HR app PR #156 lesson).
+function openPrintWindow(html) {
+  const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+  const w = window.open(url, '_blank');
+  if (!w) toast('Popup blocked — allow popups to print receipts', 'error');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+async function printReceipt(orderId) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (!order) return;
+  const detail = await loadOrderDetail(orderId);
+  const s = state.settings;
+  const qrUrl = zatcaQrDataUrl(order);
+  const payLabel = { cash:'Cash', mada:'mada', card:'Card', stc_pay:'STC Pay', other:'Other' };
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt #${order.orderNo}</title><style>
+    @page { size: 80mm auto; margin: 3mm; }
+    body { font-family: -apple-system, 'Segoe UI', sans-serif; width: 72mm; margin: 0 auto; font-size: 11px; color: #000; }
+    .c { text-align: center; } .b { font-weight: 700; }
+    .row { display: flex; justify-content: space-between; gap: 6px; }
+    hr { border: 0; border-top: 1px dashed #000; margin: 6px 0; }
+    table { width: 100%; border-collapse: collapse; } td { padding: 1px 0; vertical-align: top; }
+    .ar { direction: rtl; font-family: -apple-system, 'Segoe UI', sans-serif; }
+    img.qr { width: 30mm; height: 30mm; display:block; margin: 6px auto; }
+    .btnbar { position: fixed; top: 0; right: 0; padding: 6px; } @media print { .btnbar { display: none; } }
+  </style></head><body>
+    <div class="btnbar"><button onclick="print()">Print</button></div>
+    <div class="c b" style="font-size:14px">${escapeHTML(s.companyName)}</div>
+    ${s.companyNameAr ? `<div class="c ar">${escapeHTML(s.companyNameAr)}</div>` : ''}
+    ${s.vatNumber ? `<div class="c">VAT: ${escapeHTML(s.vatNumber)}</div>` : ''}
+    ${s.crNumber ? `<div class="c">C.R.: ${escapeHTML(s.crNumber)}</div>` : ''}
+    <div class="c">${escapeHTML(branchName(order.branchId))}</div>
+    <hr>
+    <div class="row"><span>Simplified Tax Invoice</span><span class="ar">فاتورة ضريبية مبسطة</span></div>
+    <div class="row"><span class="b">Order #${order.orderNo}</span><span>${fmtDateTime(order.createdAt)}</span></div>
+    ${order.status === 'void' ? '<div class="c b" style="font-size:13px">*** VOID ***</div>' : ''}
+    <hr>
+    <table>${detail.items.map(l => `
+      <tr><td>${l.qty}× ${escapeHTML(l.nameEn)}${l.nameAr ? ` <span class="ar">${escapeHTML(l.nameAr)}</span>` : ''}</td>
+      <td style="text-align:end">${fmtMoney(l.lineTotal)}</td></tr>`).join('')}
+    </table>
+    <hr>
+    <div class="row"><span>Subtotal (ex-VAT) / المجموع</span><span>${fmtMoney(order.subtotal)}</span></div>
+    <div class="row"><span>VAT ${s.vatRate}% / الضريبة</span><span>${fmtMoney(order.vatAmount)}</span></div>
+    <div class="row b" style="font-size:13px"><span>TOTAL / الإجمالي</span><span>${fmtMoney(order.total)} ${escapeHTML(s.currency)}</span></div>
+    <hr>
+    ${detail.payments.map(p => `<div class="row"><span>${payLabel[p.method] || p.method}</span><span>${fmtMoney(p.amount)}</span></div>
+      ${p.method==='cash' && p.tendered != null ? `<div class="row"><span>Tendered / Change</span><span>${fmtMoney(p.tendered)} / ${fmtMoney(p.changeGiven || 0)}</span></div>` : ''}`).join('')}
+    ${qrUrl ? `<img class="qr" src="${qrUrl}" alt="ZATCA QR">` : ''}
+    ${s.receiptFooterEn ? `<div class="c">${escapeHTML(s.receiptFooterEn)}</div>` : ''}
+    ${s.receiptFooterAr ? `<div class="c ar">${escapeHTML(s.receiptFooterAr)}</div>` : ''}
+  </body></html>`;
+  openPrintWindow(html);
+}
+
+/* -------------------- DASHBOARD -------------------- */
+function renderDashboard() {
+  const today = todayISO();
+  const done = state.orders.filter(o => o.status === 'completed');
+  const todayOrders = done.filter(o => o.businessDate === today);
+  const sum = list => list.reduce((s, o) => s + o.total, 0);
+  const avg = todayOrders.length ? sum(todayOrders) / todayOrders.length : 0;
+  const byBranch = state.branches.filter(b => b.active).map(b => ({
+    name: b.name,
+    today: sum(todayOrders.filter(o => o.branchId === b.id)),
+    week: sum(done.filter(o => o.branchId === b.id)),
+    n: todayOrders.filter(o => o.branchId === b.id).length,
+  }));
+  const stat = (label, value, sub) => `
+    <div class="bg-white rounded-2xl shadow-card p-4">
+      <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">${label}</div>
+      <div class="font-display text-2xl font-semibold text-slate-900 mt-1">${value}</div>
+      ${sub ? `<div class="text-xs text-slate-500 mt-1">${sub}</div>` : ''}
+    </div>`;
+  return `
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+      ${stat('Sales today', fmtMoney(sum(todayOrders)) + ' ' + escapeHTML(state.settings.currency), todayOrders.length + ' orders')}
+      ${stat('Average ticket', fmtMoney(avg), 'today')}
+      ${stat('Sales — 7 days', fmtMoney(sum(done)), done.length + ' orders')}
+      ${stat('VAT collected — 7 days', fmtMoney(done.reduce((s,o) => s + o.vatAmount, 0)), 'from completed orders')}
+    </div>
+    <div class="bg-white rounded-2xl shadow-card overflow-hidden">
+      <div class="px-5 py-4 border-b border-slate-100"><h3 class="font-display text-lg font-semibold text-slate-900">By branch</h3></div>
+      <table class="w-full text-sm">
+        <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
+          <th class="text-start px-4 py-2.5">Branch</th><th class="text-end px-4 py-2.5">Today</th><th class="text-end px-4 py-2.5">Orders today</th><th class="text-end px-4 py-2.5">7 days</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${byBranch.map(b => `<tr><td class="px-4 py-2.5 font-medium">${escapeHTML(b.name)}</td>
+            <td class="px-4 py-2.5 text-end font-semibold">${fmtMoney(b.today)}</td>
+            <td class="px-4 py-2.5 text-end">${b.n}</td>
+            <td class="px-4 py-2.5 text-end text-slate-600">${fmtMoney(b.week)}</td></tr>`).join('')}
+        </tbody></table>
+    </div>`;
+}
+
+/* -------------------- MENU ADMIN -------------------- */
+function renderMenu() {
+  const cats = state.categories.slice().sort((a,b) => a.sortOrder - b.sortOrder);
+  return `
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <h2 class="font-display text-2xl font-semibold text-slate-900">Menu</h2>
+      <div class="flex gap-2">
+        <button onclick="openCategoryModal(null)" class="btn btn-ghost">+ Category</button>
+        <button onclick="openItemModal(null)" class="btn btn-primary">+ Item</button>
+      </div>
+    </div>
+    ${cats.map(c => {
+      const items = state.items.filter(i => i.categoryId === c.id).sort((a,b) => a.sortOrder - b.sortOrder);
+      return `
+      <div class="bg-white rounded-2xl shadow-card overflow-hidden mb-4 ${c.active ? '' : 'opacity-60'}">
+        <div class="px-5 py-3 bg-slate-50/60 border-b border-slate-100 flex items-center justify-between">
+          <div class="font-display font-semibold text-slate-900">${escapeHTML(c.nameEn)} ${c.nameAr ? `<span class="text-slate-400 text-sm" dir="rtl">${escapeHTML(c.nameAr)}</span>` : ''} ${c.active ? '' : '<span class="badge badge-slate">Inactive</span>'}</div>
+          <button onclick="openCategoryModal('${c.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
+        </div>
+        <div class="divide-y divide-slate-100">
+          ${items.map(i => `
+            <div class="px-5 py-2.5 flex items-center gap-3 text-sm ${i.active ? '' : 'opacity-50'}">
+              <div class="flex-1"><span class="font-medium">${escapeHTML(i.nameEn)}</span>${i.nameAr ? ` <span class="text-slate-400" dir="rtl">${escapeHTML(i.nameAr)}</span>` : ''}${i.active ? '' : ' <span class="badge badge-slate">Off</span>'}</div>
+              <div class="font-semibold">${fmtMoney(i.price)}</div>
+              <button onclick="openItemModal('${i.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
+            </div>`).join('') || '<div class="px-5 py-4 text-sm text-slate-400">No items yet.</div>'}
+        </div>
+      </div>`;
+    }).join('') || '<div class="bg-white rounded-2xl shadow-card p-10 text-center text-slate-400">Start by adding a category.</div>'}`;
+}
+function openCategoryModal(id) {
+  const editing = id ? state.categories.find(c => c.id === id) : null;
+  openModal(editing ? 'Edit category' : 'New category', `
+    <div class="space-y-3">
+      <div><label class="label">Name (English)</label><input id="cat-en" class="input" value="${escapeHTML(editing?.nameEn || '')}"></div>
+      <div><label class="label">Name (Arabic)</label><input id="cat-ar" class="input" dir="rtl" value="${escapeHTML(editing?.nameAr || '')}"></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Sort order</label><input id="cat-sort" type="number" class="input" value="${editing?.sortOrder ?? (state.categories.length + 1) * 10}"></div>
+        <div><label class="label">Active</label><select id="cat-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+      </div>
+    </div>`, async () => {
+    const row = { name_en: $('#cat-en').value.trim(), name_ar: $('#cat-ar').value.trim(),
+      sort_order: parseInt($('#cat-sort').value) || 0, active: $('#cat-active').value === '1' };
+    if (!row.name_en) { toast('Name required', 'error'); return false; }
+    const q = editing ? sb.from('menu_categories').update(row).eq('id', editing.id) : sb.from('menu_categories').insert(row);
+    const { error } = await q;
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    await loadAll(); render(); toast('Saved', 'success');
+  });
+}
+function openItemModal(id) {
+  const editing = id ? state.items.find(i => i.id === id) : null;
+  const cats = state.categories.slice().sort((a,b) => a.sortOrder - b.sortOrder);
+  if (!cats.length) { toast('Add a category first', 'error'); return; }
+  const offSet = new Set(state.branchOff.filter(o => o.itemId === id).map(o => o.branchId));
+  openModal(editing ? 'Edit item' : 'New item', `
+    <div class="space-y-3">
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Name (English)</label><input id="item-en" class="input" value="${escapeHTML(editing?.nameEn || '')}"></div>
+        <div><label class="label">Name (Arabic)</label><input id="item-ar" class="input" dir="rtl" value="${escapeHTML(editing?.nameAr || '')}"></div>
+      </div>
+      <div class="grid grid-cols-3 gap-3">
+        <div><label class="label">Price (incl. VAT)</label><input id="item-price" type="number" min="0" step="0.05" class="input" value="${editing?.price ?? ''}"></div>
+        <div><label class="label">Category</label><select id="item-cat" class="input">${cats.map(c => `<option value="${c.id}" ${editing?.categoryId === c.id ? 'selected':''}>${escapeHTML(c.nameEn)}</option>`).join('')}</select></div>
+        <div><label class="label">Sort</label><input id="item-sort" type="number" class="input" value="${editing?.sortOrder ?? 10}"></div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">SKU (optional)</label><input id="item-sku" class="input" value="${escapeHTML(editing?.sku || '')}"></div>
+        <div><label class="label">Active</label><select id="item-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+      </div>
+      <div>
+        <label class="label">Available at</label>
+        <div class="flex gap-3 flex-wrap">
+          ${state.branches.filter(b => b.active).map(b => `
+            <label class="flex items-center gap-1.5 text-sm"><input type="checkbox" class="item-branch" value="${b.id}" ${offSet.has(b.id) ? '' : 'checked'}> ${escapeHTML(b.name)}</label>`).join('')}
+        </div>
+      </div>
+    </div>`, async () => {
+    const row = { name_en: $('#item-en').value.trim(), name_ar: $('#item-ar').value.trim(),
+      price: parseFloat($('#item-price').value), category_id: $('#item-cat').value,
+      sku: $('#item-sku').value.trim() || null, sort_order: parseInt($('#item-sort').value) || 0,
+      active: $('#item-active').value === '1' };
+    if (!row.name_en || isNaN(row.price)) { toast('Name and price required', 'error'); return false; }
+    let itemId = editing?.id;
+    if (editing) {
+      const { error } = await sb.from('menu_items').update(row).eq('id', editing.id);
+      if (error) { toast(humanizeError(error), 'error'); return false; }
+    } else {
+      const { data, error } = await sb.from('menu_items').insert(row).select().single();
+      if (error) { toast(humanizeError(error), 'error'); return false; }
+      itemId = data.id;
+    }
+    // Branch availability: absence of a row = available. Rewrite the off-rows.
+    const wanted = new Set([...document.querySelectorAll('.item-branch:checked')].map(cb => cb.value));
+    const offRows = state.branches.filter(b => b.active && !wanted.has(b.id)).map(b => ({ item_id: itemId, branch_id: b.id }));
+    await sb.from('menu_item_branch_off').delete().eq('item_id', itemId);
+    if (offRows.length) await sb.from('menu_item_branch_off').insert(offRows);
+    await loadAll(); render(); toast('Saved', 'success');
+  });
+}
+
+/* -------------------- BRANCHES / STAFF / SETTINGS -------------------- */
+function renderBranches() {
+  return `
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="font-display text-2xl font-semibold text-slate-900">Branches</h2>
+      <button onclick="openBranchModal(null)" class="btn btn-primary">+ Branch</button>
+    </div>
+    <div class="bg-white rounded-2xl shadow-card divide-y divide-slate-100">
+      ${state.branches.map(b => `
+        <div class="px-5 py-3 flex items-center gap-3 ${b.active ? '' : 'opacity-50'}">
+          <div class="flex-1 font-medium">${escapeHTML(b.name)} ${b.nameAr ? `<span class="text-slate-400 text-sm" dir="rtl">${escapeHTML(b.nameAr)}</span>` : ''} ${b.active ? '' : '<span class="badge badge-slate">Inactive</span>'}</div>
+          <button onclick="openBranchModal('${b.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
+        </div>`).join('')}
+    </div>`;
+}
+function openBranchModal(id) {
+  const editing = id ? state.branches.find(b => b.id === id) : null;
+  openModal(editing ? 'Edit branch' : 'New branch', `
+    <div class="space-y-3">
+      <div><label class="label">Name</label><input id="br-name" class="input" value="${escapeHTML(editing?.name || '')}" placeholder="e.g. KHOBAR"></div>
+      <div><label class="label">Name (Arabic)</label><input id="br-ar" class="input" dir="rtl" value="${escapeHTML(editing?.nameAr || '')}"></div>
+      <div><label class="label">Active</label><select id="br-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+    </div>`, async () => {
+    const row = { name: $('#br-name').value.trim().toUpperCase(), name_ar: $('#br-ar').value.trim(), active: $('#br-active').value === '1' };
+    if (!row.name) { toast('Name required', 'error'); return false; }
+    const q = editing ? sb.from('branches').update(row).eq('id', editing.id) : sb.from('branches').insert(row);
+    const { error } = await q;
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    await loadAll(); render(); toast('Saved', 'success');
+  });
+}
+function renderStaff() {
+  return `
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="font-display text-2xl font-semibold text-slate-900">Staff</h2>
+      <button onclick="openStaffModal(null)" class="btn btn-primary">+ Staff</button>
+    </div>
+    <div class="bg-white rounded-2xl shadow-card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
+          <th class="text-start px-4 py-2.5">Name</th><th class="text-start px-4 py-2.5">Email</th><th class="text-start px-4 py-2.5">Role</th>
+          <th class="text-start px-4 py-2.5">Branch</th><th class="text-start px-4 py-2.5">Login</th><th class="px-4 py-2.5"></th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${state.staff.map(s => `
+            <tr class="${s.active ? '' : 'opacity-50'}">
+              <td class="px-4 py-2.5 font-medium">${escapeHTML((s.firstName + ' ' + s.lastName).trim() || '—')}</td>
+              <td class="px-4 py-2.5 text-slate-600">${escapeHTML(s.email)}</td>
+              <td class="px-4 py-2.5"><span class="badge badge-slate">${escapeHTML(s.role)}</span></td>
+              <td class="px-4 py-2.5">${escapeHTML(s.branchId ? branchName(s.branchId) : '—')}</td>
+              <td class="px-4 py-2.5">${s.userId ? '<span class="badge badge-green">Linked</span>' : '<span class="badge badge-amber">Awaiting signup</span>'}</td>
+              <td class="px-4 py-2.5 text-end"><button onclick="openStaffModal('${s.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button></td>
+            </tr>`).join('')}
+        </tbody></table>
+    </div>
+    <p class="text-xs text-slate-500 mt-3">Add a staff member here first, then have them use "Create account" on the login screen with the same email — it links automatically.</p>`;
+}
+function openStaffModal(id) {
+  const editing = id ? state.staff.find(s => s.id === id) : null;
+  openModal(editing ? 'Edit staff' : 'New staff', `
+    <div class="space-y-3">
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">First name</label><input id="st-first" class="input" value="${escapeHTML(editing?.firstName || '')}"></div>
+        <div><label class="label">Last name</label><input id="st-last" class="input" value="${escapeHTML(editing?.lastName || '')}"></div>
+      </div>
+      <div><label class="label">Email</label><input id="st-email" type="email" class="input" value="${escapeHTML(editing?.email || '')}" ${editing?.userId ? 'disabled' : ''}></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Role</label><select id="st-role" class="input">
+          ${['admin','manager','cashier'].map(r => `<option value="${r}" ${editing?.role === r ? 'selected':''}>${r}</option>`).join('')}</select></div>
+        <div><label class="label">Branch</label><select id="st-branch" class="input">
+          <option value="">— None —</option>
+          ${state.branches.filter(b => b.active).map(b => `<option value="${b.id}" ${editing?.branchId === b.id ? 'selected':''}>${escapeHTML(b.name)}</option>`).join('')}</select></div>
+      </div>
+      <div><label class="label">Active</label><select id="st-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+      ${!editing ? '<div class="bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-amber-800">Cashiers must have a branch — RLS blocks their orders otherwise.</div>' : ''}
+    </div>`, async () => {
+    const row = { first_name: $('#st-first').value.trim(), last_name: $('#st-last').value.trim(),
+      email: $('#st-email').value.trim().toLowerCase(), role: $('#st-role').value,
+      branch_id: $('#st-branch').value || null, active: $('#st-active').value === '1' };
+    if (!row.email) { toast('Email required', 'error'); return false; }
+    if (row.role === 'cashier' && !row.branch_id) { toast('Cashiers need a branch', 'error'); return false; }
+    if (editing?.userId) delete row.email; // linked accounts keep their email
+    const q = editing ? sb.from('staff').update(row).eq('id', editing.id) : sb.from('staff').insert(row);
+    const { error } = await q;
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    await loadAll(); render(); toast('Saved', 'success');
+  });
+}
+function renderSettings() {
+  const s = state.settings;
+  return `
+    <h2 class="font-display text-2xl font-semibold text-slate-900 mb-4">Settings</h2>
+    <div class="bg-white rounded-2xl shadow-card p-6 max-w-2xl space-y-3">
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Company name (legal, EN)</label><input id="set-name" class="input" value="${escapeHTML(s.companyName)}"></div>
+        <div><label class="label">Company name (AR)</label><input id="set-name-ar" class="input" dir="rtl" value="${escapeHTML(s.companyNameAr)}"></div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">VAT number</label><input id="set-vat" class="input" value="${escapeHTML(s.vatNumber)}" placeholder="3xxxxxxxxxxxxx3"><div class="text-[10px] text-slate-500 mt-1">Encoded into the ZATCA QR on every receipt.</div></div>
+        <div><label class="label">C.R. number</label><input id="set-cr" class="input" value="${escapeHTML(s.crNumber)}"></div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Currency</label><input id="set-currency" class="input" value="${escapeHTML(s.currency)}"></div>
+        <div><label class="label">VAT rate %</label><input id="set-rate" type="number" min="0" step="0.01" class="input" value="${s.vatRate}"></div>
+      </div>
+      <div><label class="label">Receipt footer (EN)</label><input id="set-footer-en" class="input" value="${escapeHTML(s.receiptFooterEn)}"></div>
+      <div><label class="label">Receipt footer (AR)</label><input id="set-footer-ar" class="input" dir="rtl" value="${escapeHTML(s.receiptFooterAr)}"></div>
+      <button onclick="saveSettings()" class="btn btn-primary">Save settings</button>
+    </div>`;
+}
+async function saveSettings() {
+  const row = { company_name: $('#set-name').value.trim(), company_name_ar: $('#set-name-ar').value.trim(),
+    vat_number: $('#set-vat').value.trim(), cr_number: $('#set-cr').value.trim(),
+    currency: $('#set-currency').value.trim() || 'SAR', vat_rate: parseFloat($('#set-rate').value) || 15,
+    receipt_footer_en: $('#set-footer-en').value.trim(), receipt_footer_ar: $('#set-footer-ar').value.trim(), updated_at: new Date().toISOString() };
+  const { error } = await sb.from('pos_settings').update(row).eq('id', state.settingsId);
+  if (error) { toast(humanizeError(error), 'error'); return; }
+  await loadAll(); render(); toast('Settings saved', 'success');
+}
+
+/* -------------------- INIT -------------------- */
+async function bootstrap() {
+  if (!sb) { render(); return; }
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session?.user) {
+      state.session = { userId: session.user.id, email: session.user.email, loggedAt: new Date().toISOString() };
+      await loadAll();
+    }
+  } catch (e) { console.error('Bootstrap error:', e); }
+  render();
+  sb?.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_OUT') { state = emptyState(); posCart = []; location.hash = ''; render(); }
+    else if (event === 'SIGNED_IN' && session?.user && !state.session) {
+      state.session = { userId: session.user.id, email: session.user.email, loggedAt: new Date().toISOString() };
+      await loadAll(); render();
+    }
+  });
+}
+bootstrap();
+</script>
+</body>
+</html>
