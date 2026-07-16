@@ -713,6 +713,61 @@ ALTER TABLE public.item_modifier_groups
   ADD COLUMN IF NOT EXISTS default_option_id uuid references public.modifier_options(id) on delete set null;
 
 -- =============================================================
+-- 11. CATEGORY NAMES -> EXACTLY the Foodics categories export
+--     The reconstructed names ("Hot Drinks", "Filter Coffee"...) are
+--     renamed IN PLACE to the exact Foodics strings so products keep
+--     their category; the categories Foodics has that the
+--     reconstruction lacked are created; the products that can be
+--     placed with certainty are moved. Foodics keeps one bilingual
+--     name field, so the full string lives in name_en and name_ar is
+--     cleared -- the menu and POS tabs then read exactly as Foodics.
+--     NOTE: do NOT re-run seed-foodics-menu.sql after this block -- it
+--     matches categories by the old names and would recreate them.
+-- =============================================================
+-- 11a. Rename the reconstructed categories (products stay attached).
+UPDATE public.menu_categories SET name_en = 'HOT - حار',                     name_ar = '', sort_order = 10  WHERE lower(name_en) = 'hot drinks';
+UPDATE public.menu_categories SET name_en = 'ICED - بارد',                   name_ar = '', sort_order = 20  WHERE lower(name_en) = 'iced drinks';
+UPDATE public.menu_categories SET name_en = 'MANUAL ESPRESSO - اسبريسو يدوي', name_ar = '', sort_order = 30  WHERE lower(name_en) = 'manual espresso';
+UPDATE public.menu_categories SET name_en = 'V60 - قهوة مقطرة',              name_ar = '', sort_order = 40  WHERE lower(name_en) = 'filter coffee';
+UPDATE public.menu_categories SET name_en = 'SWEET - الحلى',                 name_ar = '', sort_order = 50  WHERE lower(name_en) = 'sweets';
+UPDATE public.menu_categories SET name_en = 'BEANS 250g - بن',               name_ar = '', sort_order = 60  WHERE lower(name_en) = 'retail beans';
+UPDATE public.menu_categories SET name_en = 'العروض - Offers',               name_ar = '', sort_order = 80  WHERE lower(name_en) = 'bundles & boxes';
+UPDATE public.menu_categories SET name_en = 'معدات - Equipment',             name_ar = '', sort_order = 90  WHERE lower(name_en) = 'equipment';
+UPDATE public.menu_categories SET name_en = 'CONSUMPTION - إستهلاك',         name_ar = '', sort_order = 130 WHERE lower(name_en) = 'staff & internal';
+
+-- 11b. Create the Foodics categories the reconstruction lacked.
+INSERT INTO public.menu_categories (name_en, name_ar, sort_order, active)
+SELECT v.n, '', v.so, true FROM (VALUES
+  ('BEANS 1Kg - بن', 70),
+  ('Top Shelf - المحاصيل الفاخرة', 100),
+  ('EMPLOYEE COFFEE. قهوة الموظفين', 110),
+  ('الموظفين -  Employees sweet.', 120),
+  ('COMPENSATION - التعويض', 140)
+) AS v(n, so)
+WHERE NOT EXISTS (SELECT 1 FROM public.menu_categories c WHERE c.name_en = v.n);
+
+-- 11c. 1kg bags belong in BEANS 1Kg, not BEANS 250g.
+UPDATE public.menu_items SET category_id = (SELECT id FROM public.menu_categories WHERE name_en = 'BEANS 1Kg - بن')
+ WHERE category_id = (SELECT id FROM public.menu_categories WHERE name_en = 'BEANS 250g - بن')
+   AND (name_en ILIKE '%1kg%' OR name_en ILIKE '%1 kg%');
+
+-- 11d. The EMP-marked staff sweets (by SKU from the products export).
+UPDATE public.menu_items SET category_id = (SELECT id FROM public.menu_categories WHERE name_en = 'الموظفين -  Employees sweet.')
+ WHERE sku IN ('sk-0288','sk-0137','sk-0101','sk-0266');
+
+-- 11e. Foodics has no Drip Bags category -- fold them into BEANS 250g,
+--      then drop the now-empty reconstructed category.
+UPDATE public.menu_items SET category_id = (SELECT id FROM public.menu_categories WHERE name_en = 'BEANS 250g - بن')
+ WHERE category_id = (SELECT id FROM public.menu_categories WHERE lower(name_en) = 'drip bags');
+DELETE FROM public.menu_categories c
+ WHERE lower(c.name_en) = 'drip bags'
+   AND NOT EXISTS (SELECT 1 FROM public.menu_items i WHERE i.category_id = c.id);
+
+-- 11f. Hide the throwaway test categories from the first day (kept, not
+--      deleted -- they may hold test items).
+UPDATE public.menu_categories SET active = false WHERE name_en IN ('v60','HOT');
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
