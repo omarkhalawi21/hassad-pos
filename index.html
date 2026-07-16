@@ -121,8 +121,11 @@ function mapItemFromDb(r) {
 function mapOrderFromDb(r) {
   return { id: r.id, branchId: r.branch_id, businessDate: r.business_date, orderNo: Number(r.order_no) || 0,
     status: r.status || 'completed', subtotal: Number(r.subtotal) || 0, vatAmount: Number(r.vat_amount) || 0,
-    total: Number(r.total) || 0, cashierId: r.cashier_id, voidReason: r.void_reason || '', createdAt: r.created_at };
+    total: Number(r.total) || 0, cashierId: r.cashier_id, voidReason: r.void_reason || '', createdAt: r.created_at,
+    orderType: r.order_type || 'pickup', discountAmount: Number(r.discount_amount) || 0,
+    discountReason: r.discount_reason || '', returnedAt: r.returned_at, returnedBy: r.returned_by };
 }
+const ORDER_TYPES = { pickup: 'Pickup', dine_in: 'Dine-in', delivery: 'Delivery', drive_thru: 'Drive-thru' };
 function mapOrderItemFromDb(r) {
   return { id: r.id, orderId: r.order_id, itemId: r.item_id, nameEn: r.name_en || '', nameAr: r.name_ar || '',
     unitPrice: Number(r.unit_price) || 0, qty: Number(r.qty) || 0, lineTotal: Number(r.line_total) || 0 };
@@ -210,7 +213,8 @@ async function logout() {
   await sb.auth.signOut();
   state = emptyState();
   // Shared-tablet hygiene: reset every module-level transient var.
-  posCart = []; posCategoryId = null; _checkoutSplit = null; authMode = 'login';
+  posCart = []; posCategoryId = null; posOrderType = 'pickup'; posDiscount = null;
+  _checkoutSplit = null; authMode = 'login';
   location.hash = '';
   render();
 }
@@ -362,6 +366,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.g
 /* -------------------- POS CONSOLE -------------------- */
 let posCart = [];        // [{itemId, nameEn, nameAr, unitPrice, qty}]
 let posCategoryId = null;
+let posOrderType = 'pickup';
+let posDiscount = null;  // { amount, reason } — final SAR amount off the gross
 let _checkoutSplit = null;
 
 function posBranchId() {
@@ -372,9 +378,14 @@ function itemAvailableAt(itemId, branchId) {
   return !state.branchOff.some(o => o.itemId === itemId && o.branchId === branchId);
 }
 function cartTotals() {
-  const total = posCart.reduce((s, l) => s + l.unitPrice * l.qty, 0);
+  const gross = posCart.reduce((s, l) => s + l.unitPrice * l.qty, 0);
+  // Discount comes off the VAT-inclusive gross; VAT is then derived from
+  // what the customer actually pays (KSA VAT is owed on the discounted
+  // consideration, not the shelf price).
+  const discount = Math.min(posDiscount?.amount || 0, gross);
+  const total = gross - discount;
   const vat = vatPortion(total, state.settings.vatRate);
-  return { total, vat, subtotal: total - vat };
+  return { gross, discount, total, vat, subtotal: total - vat };
 }
 function addToCart(itemId) {
   const it = state.items.find(i => i.id === itemId); if (!it) return;
@@ -389,7 +400,33 @@ function cartQty(itemId, delta) {
   if (line.qty <= 0) posCart = posCart.filter(l => l !== line);
   render();
 }
-function clearCart() { posCart = []; render(); }
+function clearCart() { posCart = []; posDiscount = null; posOrderType = 'pickup'; render(); }
+
+function openDiscountModal() {
+  const t = cartTotals();
+  openModal('Discount', `
+    <div class="space-y-3">
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Amount (${escapeHTML(state.settings.currency)})</label>
+          <input id="disc-amount" type="number" min="0" step="0.05" class="input" value="${posDiscount?.amount || ''}" placeholder="0.00" oninput="$('#disc-pct').value=''"></div>
+        <div><label class="label">— or percent %</label>
+          <input id="disc-pct" type="number" min="0" max="100" step="1" class="input" placeholder="e.g. 10" oninput="$('#disc-amount').value=''"></div>
+      </div>
+      <div><label class="label">Reason</label><input id="disc-reason" class="input" value="${escapeHTML(posDiscount?.reason || '')}" placeholder="e.g. staff drink, complaint goodwill"></div>
+      <div class="text-xs text-slate-500">Cart gross: ${fmtMoney(t.gross)} — the discount and the recalculated VAT print on the receipt.</div>
+    </div>`, async () => {
+    const pct = parseFloat($('#disc-pct').value);
+    let amount = parseFloat($('#disc-amount').value);
+    if (!isNaN(pct) && pct > 0) amount = +(cartTotals().gross * Math.min(pct, 100) / 100).toFixed(2);
+    const reason = $('#disc-reason').value.trim();
+    if (isNaN(amount) || amount <= 0) { posDiscount = null; render(); return true; } // cleared
+    if (amount > cartTotals().gross + 0.005) { toast('Discount cannot exceed the cart total', 'error'); return false; }
+    if (!reason) { toast('A reason is required for discounts', 'error'); return false; }
+    posDiscount = { amount: +amount.toFixed(2), reason };
+    render();
+    return true;
+  }, { saveLabel: 'Apply' });
+}
 
 function renderPos() {
   const branchId = posBranchId();
@@ -420,6 +457,10 @@ function renderPos() {
           <h3 class="font-display font-semibold text-slate-900">Order — ${escapeHTML(branchName(branchId))}</h3>
           ${posCart.length ? `<button onclick="clearCart()" class="text-xs text-rose-500 hover:underline">Clear</button>` : ''}
         </div>
+        <div class="flex gap-1.5 flex-wrap mb-3">
+          ${Object.entries(ORDER_TYPES).map(([k, label]) => `
+            <button onclick="posOrderType='${k}'; render();" class="px-3 py-1.5 rounded-full text-xs font-semibold border ${posOrderType===k ? 'bg-brand-700 text-white border-brand-700' : 'bg-white text-slate-600 border-slate-200 hover:bg-brand-50'}">${label}</button>`).join('')}
+        </div>
         ${posCart.length === 0 ? '<div class="text-sm text-slate-400 py-8 text-center">Tap items to add them</div>' : `
         <div class="space-y-2 mb-3">
           ${posCart.map(l => `
@@ -432,11 +473,17 @@ function renderPos() {
             </div>`).join('')}
         </div>
         <div class="border-t border-slate-100 pt-3 space-y-1 text-sm">
+          ${t.discount > 0 ? `
+          <div class="flex justify-between text-slate-500"><span>Items</span><span>${fmtMoney(t.gross)}</span></div>
+          <div class="flex justify-between text-emerald-700 font-semibold"><span>Discount${posDiscount?.reason ? ` — ${escapeHTML(posDiscount.reason)}` : ''}</span><span>−${fmtMoney(t.discount)}</span></div>` : ''}
           <div class="flex justify-between text-slate-500"><span>Subtotal (ex-VAT)</span><span>${fmtMoney(t.subtotal)}</span></div>
           <div class="flex justify-between text-slate-500"><span>VAT ${state.settings.vatRate}%</span><span>${fmtMoney(t.vat)}</span></div>
           <div class="flex justify-between font-bold text-lg text-slate-900"><span>Total</span><span>${fmtMoney(t.total)} ${escapeHTML(state.settings.currency)}</span></div>
         </div>
-        <button onclick="openCheckoutModal()" class="btn btn-primary w-full mt-4 !py-3 !text-base">Charge ${fmtMoney(t.total)}</button>`}
+        <div class="flex gap-2 mt-4">
+          <button onclick="openDiscountModal()" class="btn btn-ghost !py-3">${t.discount > 0 ? 'Edit discount' : 'Discount'}</button>
+          <button onclick="openCheckoutModal()" class="btn btn-primary flex-1 !py-3 !text-base">Charge ${fmtMoney(t.total)}</button>
+        </div>`}
       </div>
     </div>`;
 }
@@ -524,7 +571,9 @@ async function saveOrder() {
   const branchId = posBranchId();
   const me = currentStaff();
   const orderRow = { branch_id: branchId, business_date: todayISO(), status: 'completed',
-    subtotal: +t.subtotal.toFixed(2), vat_amount: +t.vat.toFixed(2), total: +t.total.toFixed(2), cashier_id: me?.id || null };
+    subtotal: +t.subtotal.toFixed(2), vat_amount: +t.vat.toFixed(2), total: +t.total.toFixed(2), cashier_id: me?.id || null,
+    order_type: posOrderType, discount_amount: +t.discount.toFixed(2),
+    discount_reason: t.discount > 0 ? (posDiscount?.reason || null) : null };
 
   // Insert; the DB trigger assigns order_no. Concurrent cashiers on one
   // branch can collide on the unique (branch, date, no) — retry once.
@@ -549,7 +598,7 @@ async function saveOrder() {
   const mapped = mapOrderFromDb(order);
   state.orders.unshift(mapped);
   state.orderDetailCache[order.id] = { items: lineRows.map(mapOrderItemFromDb), payments: payments.map((p,i) => mapPaymentFromDb({ ...p, id:'tmp'+i, order_id: order.id })) };
-  posCart = [];
+  posCart = []; posDiscount = null; posOrderType = 'pickup';
   render();
   toast(`Order #${mapped.orderNo} completed`, 'success');
   printReceipt(mapped.id);
@@ -568,32 +617,50 @@ function renderOrders() {
       <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead><tr class="text-start text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
           <th class="text-start px-4 py-2.5">#</th><th class="text-start px-4 py-2.5">Time</th><th class="text-start px-4 py-2.5">Branch</th>
-          <th class="text-start px-4 py-2.5">Cashier</th><th class="text-end px-4 py-2.5">Total</th><th class="text-start px-4 py-2.5">Status</th><th class="px-4 py-2.5"></th></tr></thead>
+          <th class="text-start px-4 py-2.5">Type</th><th class="text-start px-4 py-2.5">Cashier</th><th class="text-end px-4 py-2.5">Total</th>
+          <th class="text-start px-4 py-2.5">Status</th><th class="px-4 py-2.5"></th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${list.map(o => `
-            <tr class="hover:bg-slate-50 ${o.status==='void' ? 'opacity-50' : ''}">
+            <tr class="hover:bg-slate-50 ${o.status!=='completed' ? 'opacity-50' : ''}">
               <td class="px-4 py-2.5 font-bold text-brand-700">#${o.orderNo}</td>
               <td class="px-4 py-2.5 text-slate-600">${fmtDateTime(o.createdAt)}</td>
               <td class="px-4 py-2.5">${escapeHTML(branchName(o.branchId))}</td>
+              <td class="px-4 py-2.5"><span class="badge badge-slate">${ORDER_TYPES[o.orderType] || o.orderType}</span></td>
               <td class="px-4 py-2.5 text-slate-600">${escapeHTML(staffName(o.cashierId))}</td>
-              <td class="px-4 py-2.5 text-end font-semibold">${fmtMoney(o.total)}</td>
-              <td class="px-4 py-2.5">${o.status==='void' ? '<span class="badge badge-red">Void</span>' : '<span class="badge badge-green">Completed</span>'}</td>
+              <td class="px-4 py-2.5 text-end font-semibold">${fmtMoney(o.total)}${o.discountAmount > 0 ? ` <span class="text-[10px] text-emerald-700">(−${fmtMoney(o.discountAmount)})</span>` : ''}</td>
+              <td class="px-4 py-2.5">${o.status==='void' ? '<span class="badge badge-red">Void</span>' : o.status==='returned' ? '<span class="badge badge-amber">Returned</span>' : '<span class="badge badge-green">Completed</span>'}</td>
               <td class="px-4 py-2.5 text-end whitespace-nowrap">
                 <button onclick="printReceipt('${o.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Receipt</button>
-                ${hasRole('admin','manager') && o.status!=='void' ? `<button onclick="voidOrder('${o.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Void</button>` : ''}
+                ${hasRole('admin','manager') && o.status==='completed' ? `
+                <button onclick="returnOrder('${o.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Return</button>
+                <button onclick="voidOrder('${o.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Void</button>` : ''}
               </td>
-            </tr>`).join('') || '<tr><td colspan="7" class="text-center text-slate-400 py-10">No orders yet.</td></tr>'}
+            </tr>`).join('') || '<tr><td colspan="8" class="text-center text-slate-400 py-10">No orders yet.</td></tr>'}
         </tbody></table></div>
     </div>`;
 }
 async function voidOrder(orderId) {
-  const reason = prompt('Void reason (required):');
+  const reason = prompt('Void reason (required) — use Void for mistakes caught before handover; use Return if the customer paid and got money back:');
   if (!reason?.trim()) return;
   const { error } = await sb.from('orders').update({ status:'void', void_reason: reason.trim() }).eq('id', orderId);
   if (error) { toast(humanizeError(error), 'error'); return; }
   const o = state.orders.find(x => x.id === orderId);
   if (o) { o.status = 'void'; o.voidReason = reason.trim(); }
   render(); toast('Order voided', 'success');
+}
+async function returnOrder(orderId) {
+  const o = state.orders.find(x => x.id === orderId);
+  if (!o) return;
+  const reason = prompt(`Return order #${o.orderNo} (${fmtMoney(o.total)} ${state.settings.currency}) — reason (required):`);
+  if (!reason?.trim()) return;
+  const me = currentStaff();
+  const { error } = await sb.from('orders').update({
+    status: 'returned', void_reason: reason.trim(),
+    returned_at: new Date().toISOString(), returned_by: me?.id || null,
+  }).eq('id', orderId);
+  if (error) { toast(humanizeError(error), 'error'); return; }
+  o.status = 'returned'; o.voidReason = reason.trim(); o.returnedAt = new Date().toISOString();
+  render(); toast(`Order #${o.orderNo} returned — refund ${fmtMoney(o.total)} to the customer`, 'success');
 }
 
 /* -------------------- RECEIPT + ZATCA QR -------------------- */
@@ -654,13 +721,18 @@ async function printReceipt(orderId) {
     <hr>
     <div class="row"><span>Simplified Tax Invoice</span><span class="ar">فاتورة ضريبية مبسطة</span></div>
     <div class="row"><span class="b">Order #${order.orderNo}</span><span>${fmtDateTime(order.createdAt)}</span></div>
+    <div class="row"><span>${ORDER_TYPES[order.orderType] || 'Pickup'}</span><span>${escapeHTML(staffName(order.cashierId))}</span></div>
     ${order.status === 'void' ? '<div class="c b" style="font-size:13px">*** VOID ***</div>' : ''}
+    ${order.status === 'returned' ? '<div class="c b" style="font-size:13px">*** RETURNED / مرتجع ***</div>' : ''}
     <hr>
     <table>${detail.items.map(l => `
       <tr><td>${l.qty}× ${escapeHTML(l.nameEn)}${l.nameAr ? ` <span class="ar">${escapeHTML(l.nameAr)}</span>` : ''}</td>
       <td style="text-align:end">${fmtMoney(l.lineTotal)}</td></tr>`).join('')}
     </table>
     <hr>
+    ${order.discountAmount > 0 ? `
+    <div class="row"><span>Items / الأصناف</span><span>${fmtMoney(order.total + order.discountAmount)}</span></div>
+    <div class="row"><span>Discount / الخصم</span><span>-${fmtMoney(order.discountAmount)}</span></div>` : ''}
     <div class="row"><span>Subtotal (ex-VAT) / المجموع</span><span>${fmtMoney(order.subtotal)}</span></div>
     <div class="row"><span>VAT ${s.vatRate}% / الضريبة</span><span>${fmtMoney(order.vatAmount)}</span></div>
     <div class="row b" style="font-size:13px"><span>TOTAL / الإجمالي</span><span>${fmtMoney(order.total)} ${escapeHTML(s.currency)}</span></div>
@@ -679,8 +751,13 @@ function renderDashboard() {
   const today = todayISO();
   const done = state.orders.filter(o => o.status === 'completed');
   const todayOrders = done.filter(o => o.businessDate === today);
+  const returnedToday = state.orders.filter(o => o.status === 'returned' && o.businessDate === today);
   const sum = list => list.reduce((s, o) => s + o.total, 0);
+  const discountsToday = todayOrders.reduce((s, o) => s + o.discountAmount, 0);
   const avg = todayOrders.length ? sum(todayOrders) / todayOrders.length : 0;
+  const byType = Object.entries(ORDER_TYPES)
+    .map(([k, label]) => ({ label, n: todayOrders.filter(o => o.orderType === k).length }))
+    .filter(x => x.n > 0);
   const byBranch = state.branches.filter(b => b.active).map(b => ({
     name: b.name,
     today: sum(todayOrders.filter(o => o.branchId === b.id)),
@@ -694,12 +771,18 @@ function renderDashboard() {
       ${sub ? `<div class="text-xs text-slate-500 mt-1">${sub}</div>` : ''}
     </div>`;
   return `
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
       ${stat('Sales today', fmtMoney(sum(todayOrders)) + ' ' + escapeHTML(state.settings.currency), todayOrders.length + ' orders')}
       ${stat('Average ticket', fmtMoney(avg), 'today')}
+      ${stat('Returns today', fmtMoney(sum(returnedToday)), returnedToday.length + ' order' + (returnedToday.length===1?'':'s'))}
+      ${stat('Discounts today', fmtMoney(discountsToday), 'off completed orders')}
       ${stat('Sales — 7 days', fmtMoney(sum(done)), done.length + ' orders')}
-      ${stat('VAT collected — 7 days', fmtMoney(done.reduce((s,o) => s + o.vatAmount, 0)), 'from completed orders')}
+      ${stat('VAT — 7 days', fmtMoney(done.reduce((s,o) => s + o.vatAmount, 0)), 'from completed orders')}
     </div>
+    ${byType.length ? `<div class="bg-white rounded-2xl shadow-card px-4 py-3 mb-5 flex items-center gap-3 flex-wrap text-sm">
+      <span class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Today by type</span>
+      ${byType.map(x => `<span class="badge badge-slate">${x.label} · ${x.n}</span>`).join('')}
+    </div>` : ''}
     <div class="bg-white rounded-2xl shadow-card overflow-hidden">
       <div class="px-5 py-4 border-b border-slate-100"><h3 class="font-display text-lg font-semibold text-slate-900">By branch</h3></div>
       <table class="w-full text-sm">

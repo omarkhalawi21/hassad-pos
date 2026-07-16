@@ -416,6 +416,33 @@ CREATE POLICY "order_payments_delete_admin"
   ON public.order_payments FOR DELETE TO authenticated USING (public.is_admin());
 
 -- =============================================================
+-- 5. ORDER TYPES, DISCOUNTS, RETURNS (shift-parity with Foodics)
+--    * order_type: every order carries pickup / dine_in / delivery /
+--      drive_thru (Foodics dashboard breaks sales down by these).
+--    * Discounts: applied to the VAT-inclusive gross BEFORE the VAT
+--      portion is derived (KSA VAT is owed on the consideration
+--      actually charged). Stored as final amount + reason.
+--    * Returns: full-order, post-payment (distinct from 'void' =
+--      pre-handover mistake). status='returned' keeps the row for
+--      the audit trail; reports subtract it from net sales.
+-- =============================================================
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS order_type text not null default 'pickup';
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS discount_amount numeric(12,2) not null default 0;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS discount_reason text;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS returned_at timestamptz;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS returned_by uuid references public.staff(id);
+
+ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_status_check;
+ALTER TABLE public.orders ADD CONSTRAINT orders_status_check
+  CHECK (status IN ('completed','void','returned'));
+ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_order_type_check;
+ALTER TABLE public.orders ADD CONSTRAINT orders_order_type_check
+  CHECK (order_type IN ('pickup','dine_in','delivery','drive_thru'));
+ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_discount_check;
+ALTER TABLE public.orders ADD CONSTRAINT orders_discount_check
+  CHECK (discount_amount >= 0);
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
