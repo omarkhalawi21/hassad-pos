@@ -505,6 +505,58 @@ CREATE POLICY "shifts_delete_admin"
   ON public.shifts FOR DELETE TO authenticated USING (public.is_admin());
 
 -- =============================================================
+-- 7. DRAWER MOVEMENTS + ORDER NOTES (copied from the Foodics POS)
+--    Cash moves in/out of the drawer mid-shift (supplier COD, petty
+--    expenses, cash drops to the safe) -- without recording these,
+--    every real close-till looks "short". Types mirror Foodics:
+--    pay_in / pay_out / cash_drop / open_drawer (no-sale audit
+--    event, amount 0) / spot_check (mid-shift count; amount =
+--    counted cash, notes carry the over/short at that moment).
+--    Expected cash at close = float + cash sales + pay_in
+--    - pay_out - cash_drop. orders.note = free-text order note
+--    ("no sugar", customer name) printed on the receipt.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS public.shift_movements (
+  id          uuid primary key default gen_random_uuid(),
+  shift_id    uuid not null references public.shifts(id) on delete cascade,
+  type        text not null
+    CHECK (type IN ('pay_in','pay_out','cash_drop','open_drawer','spot_check')),
+  amount      numeric(12,2) not null default 0 CHECK (amount >= 0),
+  reason      text,
+  notes       text,
+  created_by  uuid references public.staff(id),
+  created_at  timestamptz not null default now()
+);
+CREATE INDEX IF NOT EXISTS shift_movements_shift_idx ON public.shift_movements(shift_id);
+
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS note text;
+
+ALTER TABLE public.shift_movements ENABLE ROW LEVEL SECURITY;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT schemaname, tablename, policyname FROM pg_policies
+           WHERE schemaname='public' AND tablename='shift_movements' LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', r.policyname, r.schemaname, r.tablename);
+  END LOOP;
+END $$;
+-- Scoped through the parent shift's branch, same shape as shifts.
+CREATE POLICY "shift_movements_select_scoped"
+  ON public.shift_movements FOR SELECT TO authenticated
+  USING (EXISTS (SELECT 1 FROM public.shifts s WHERE s.id = shift_id
+                 AND (public.has_role(ARRAY['admin','manager']) OR s.branch_id = public.my_branch_id())));
+CREATE POLICY "shift_movements_insert_scoped"
+  ON public.shift_movements FOR INSERT TO authenticated
+  WITH CHECK (EXISTS (SELECT 1 FROM public.shifts s WHERE s.id = shift_id
+                      AND (public.has_role(ARRAY['admin','manager']) OR s.branch_id = public.my_branch_id())));
+CREATE POLICY "shift_movements_update_roles"
+  ON public.shift_movements FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager']))
+  WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "shift_movements_delete_admin"
+  ON public.shift_movements FOR DELETE TO authenticated USING (public.is_admin());
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that

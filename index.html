@@ -99,6 +99,7 @@ function emptyState() {
     branches: [], staff: [], categories: [], items: [], branchOff: [],
     orders: [],           // capped recent window (today + last 7 days)
     shifts: [],           // open shifts + last 7 days of closed ones
+    shiftMovements: [],   // drawer movements for the loaded shifts window
     orderDetailCache: {}, // orderId → { items:[], payments:[] } fetched on demand for receipts
   };
 }
@@ -127,6 +128,16 @@ function mapShiftFromDb(r) {
     countedCash: r.counted_cash == null ? null : Number(r.counted_cash),
     overShort: r.over_short == null ? null : Number(r.over_short), notes: r.notes || '' };
 }
+function mapShiftMovementFromDb(r) {
+  return { id: r.id, shiftId: r.shift_id, type: r.type, amount: Number(r.amount) || 0,
+    reason: r.reason || '', notes: r.notes || '', createdBy: r.created_by, createdAt: r.created_at };
+}
+const MOVEMENT_TYPES = { pay_in: 'Pay In', pay_out: 'Pay Out', cash_drop: 'Cash Drop', open_drawer: 'Open Drawer', spot_check: 'Spot Check' };
+// Signed effect on the drawer: pay_in adds, pay_out/cash_drop remove,
+// open_drawer and spot_check are audit records with no cash effect.
+function movementDelta(m) {
+  return m.type === 'pay_in' ? m.amount : (m.type === 'pay_out' || m.type === 'cash_drop') ? -m.amount : 0;
+}
 // Small resized product photos only; validated before every <img> injection.
 const PHOTO_DATA_URL_RE = /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/;
 function safePhoto(p) { return p && PHOTO_DATA_URL_RE.test(p) ? p : ''; }
@@ -136,7 +147,7 @@ function mapOrderFromDb(r) {
     total: Number(r.total) || 0, cashierId: r.cashier_id, voidReason: r.void_reason || '', createdAt: r.created_at,
     orderType: r.order_type || 'pickup', discountAmount: Number(r.discount_amount) || 0,
     discountReason: r.discount_reason || '', returnedAt: r.returned_at, returnedBy: r.returned_by,
-    shiftId: r.shift_id || null };
+    shiftId: r.shift_id || null, note: r.note || '' };
 }
 const ORDER_TYPES = { pickup: 'Pickup', dine_in: 'Dine-in', delivery: 'Delivery', drive_thru: 'Drive-thru' };
 function mapOrderItemFromDb(r) {
@@ -163,7 +174,7 @@ function staffName(id) { const s = state.staff.find(x => x.id === id); return s 
 /* -------------------- DATA LOAD -------------------- */
 async function loadAll() {
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR] = await Promise.all([
+  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR] = await Promise.all([
     sb.from('pos_settings').select('*').limit(1).maybeSingle(),
     sb.from('branches').select('*').order('name'),
     sb.from('staff').select('*').order('first_name'),
@@ -179,6 +190,9 @@ async function loadAll() {
     sb.from('shifts').select('*')
       .or(`status.eq.open,opened_at.gte.${weekAgo.toISOString()}`)
       .order('opened_at', { ascending: false }).limit(200),
+    sb.from('shift_movements').select('*')
+      .gte('created_at', weekAgo.toISOString())
+      .order('created_at', { ascending: false }).limit(500),
   ]);
   if (settingsR.data) { const s = mapSettingsFromDb(settingsR.data); state.settingsId = s._id; state.settings = s; }
   state.branches   = (branchesR.data   || []).map(mapBranchFromDb);
@@ -188,6 +202,7 @@ async function loadAll() {
   state.branchOff  = (offR.data        || []).map(r => ({ itemId: r.item_id, branchId: r.branch_id }));
   state.orders     = (ordersR.data     || []).map(mapOrderFromDb);
   state.shifts     = (shiftsR?.data    || []).map(mapShiftFromDb);
+  state.shiftMovements = (movementsR?.data || []).map(mapShiftMovementFromDb);
 }
 async function loadOrderDetail(orderId) {
   if (state.orderDetailCache[orderId]) return state.orderDetailCache[orderId];
@@ -233,6 +248,7 @@ async function logout() {
   state = emptyState();
   // Shared-tablet hygiene: reset every module-level transient var.
   posCart = []; posCategoryId = null; posOrderType = 'pickup'; posDiscount = null;
+  posOrderNote = ''; posSearchQ = '';
   _checkoutSplit = null; _itemPhoto = undefined; authMode = 'login';
   location.hash = '';
   render();
@@ -388,7 +404,19 @@ let posCart = [];        // [{itemId, nameEn, nameAr, unitPrice, qty}]
 let posCategoryId = null;
 let posOrderType = 'pickup';
 let posDiscount = null;  // { amount, reason } — final SAR amount off the gross
+let posOrderNote = '';
+let posSearchQ = '';
 let _checkoutSplit = null;
+let _posSearchTimer = null;
+function setPosSearch(v) {
+  posSearchQ = v;
+  clearTimeout(_posSearchTimer);
+  _posSearchTimer = setTimeout(() => {
+    render();
+    const inp = document.getElementById('pos-q');
+    if (inp) { inp.focus(); const val = inp.value; inp.setSelectionRange(val.length, val.length); }
+  }, 150);
+}
 
 function posBranchId() {
   // Cashiers sell at their branch; admin/manager picks (defaults to first).
@@ -420,7 +448,15 @@ function cartQty(itemId, delta) {
   if (line.qty <= 0) posCart = posCart.filter(l => l !== line);
   render();
 }
-function clearCart() { posCart = []; posDiscount = null; posOrderType = 'pickup'; render(); }
+function clearCart() { posCart = []; posDiscount = null; posOrderType = 'pickup'; posOrderNote = ''; render(); }
+
+function openOrderNoteModal() {
+  openModal('Order note', `
+    <div><label class="label">Note (prints on the receipt)</label>
+    <textarea id="order-note" class="input" rows="3" placeholder="e.g. no sugar, oat milk, customer name...">${escapeHTML(posOrderNote)}</textarea></div>`,
+    async () => { posOrderNote = $('#order-note').value.trim(); render(); return true; },
+    { saveLabel: 'Save note' });
+}
 
 function openDiscountModal() {
   const t = cartTotals();
@@ -464,20 +500,30 @@ function renderPos() {
   }
   const cats = state.categories.filter(c => c.active).sort((a,b) => a.sortOrder - b.sortOrder);
   if (!posCategoryId || !cats.some(c => c.id === posCategoryId)) posCategoryId = cats[0]?.id || null;
+  const q = posSearchQ.trim().toLowerCase();
+  // A live search spans ALL categories (Foodics behavior); otherwise the
+  // grid shows the selected category tab.
   const items = state.items
-    .filter(i => i.active && i.categoryId === posCategoryId && itemAvailableAt(i.id, branchId))
+    .filter(i => i.active && itemAvailableAt(i.id, branchId))
+    .filter(i => q
+      ? (i.nameEn.toLowerCase().includes(q) || i.nameAr.includes(posSearchQ.trim()) || (i.sku || '').toLowerCase().includes(q))
+      : i.categoryId === posCategoryId)
     .sort((a,b) => a.sortOrder - b.sortOrder);
   const t = cartTotals();
   return `
     <div class="bg-white rounded-xl shadow-card px-4 py-2 mb-4 flex items-center gap-3 flex-wrap text-sm">
       <span class="badge badge-green">Till open</span>
       <span class="text-slate-500">since ${fmtDateTime(shift.openedAt)} · float ${fmtMoney(shift.openingFloat)} · ${escapeHTML(staffName(shift.openedBy))}</span>
-      <button onclick="openCloseTillModal()" class="btn btn-ghost !py-1 !px-3 !text-xs ms-auto">Close till</button>
+      <div class="ms-auto flex gap-1.5">
+        <button onclick="openDrawerModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Drawer</button>
+        <button onclick="openCloseTillModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Close till</button>
+      </div>
     </div>
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2">
-        <div class="flex gap-1 overflow-x-auto pb-2 mb-3">
-          ${cats.map(c => `<button onclick="posCategoryId='${c.id}'; render();" class="tab whitespace-nowrap ${posCategoryId===c.id?'active':''}">${escapeHTML(c.nameEn)}</button>`).join('') || '<span class="text-sm text-slate-400">No categories yet — add them under Menu.</span>'}
+        <input id="pos-q" type="text" class="input mb-2" placeholder="Search products… (name, Arabic, SKU)" value="${escapeHTML(posSearchQ)}" oninput="setPosSearch(this.value)">
+        <div class="flex gap-1 overflow-x-auto pb-2 mb-3 ${q ? 'opacity-40' : ''}">
+          ${cats.map(c => `<button onclick="posSearchQ=''; posCategoryId='${c.id}'; render();" class="tab whitespace-nowrap ${!q && posCategoryId===c.id?'active':''}">${escapeHTML(c.nameEn)}</button>`).join('') || '<span class="text-sm text-slate-400">No categories yet — add them under Menu.</span>'}
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
           ${items.map(i => `
@@ -519,7 +565,9 @@ function renderPos() {
           <div class="flex justify-between text-slate-500"><span>VAT ${state.settings.vatRate}%</span><span>${fmtMoney(t.vat)}</span></div>
           <div class="flex justify-between font-bold text-lg text-slate-900"><span>Total</span><span>${fmtMoney(t.total)} ${escapeHTML(state.settings.currency)}</span></div>
         </div>
+        ${posOrderNote ? `<div class="mt-2 text-xs bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 text-amber-800">📝 ${escapeHTML(posOrderNote)}</div>` : ''}
         <div class="flex gap-2 mt-4">
+          <button onclick="openOrderNoteModal()" class="btn btn-ghost !py-3 !px-3" title="Order note">📝</button>
           <button onclick="openDiscountModal()" class="btn btn-ghost !py-3">${t.discount > 0 ? 'Edit discount' : 'Discount'}</button>
           <button onclick="openCheckoutModal()" class="btn btn-primary flex-1 !py-3 !text-base">Charge ${fmtMoney(t.total)}</button>
         </div>`}
@@ -533,7 +581,8 @@ function openShiftFor(branchId) {
 }
 // Cash expected in the drawer right now: float + cash payments of this
 // shift's orders that are STILL completed (a same-shift return took the
-// cash back out, so it nets to zero by exclusion).
+// cash back out, so it nets to zero by exclusion) + drawer movements
+// (pay_in adds, pay_out/cash_drop subtract).
 function shiftExpectedCash(shift) {
   const orderIds = new Set(state.orders.filter(o => o.shiftId === shift.id && o.status === 'completed').map(o => o.id));
   let cash = 0;
@@ -541,7 +590,83 @@ function shiftExpectedCash(shift) {
     const d = state.orderDetailCache[id];
     if (d) { cash += d.payments.filter(p => p.method === 'cash').reduce((s,p) => s + p.amount, 0); }
   }
-  return { cash, float: shift.openingFloat, hasAllDetails: [...orderIds].every(id => state.orderDetailCache[id]) };
+  const moves = state.shiftMovements.filter(m => m.shiftId === shift.id);
+  const movementNet = moves.reduce((s, m) => s + movementDelta(m), 0);
+  return { cash, float: shift.openingFloat, movementNet, moves,
+           expected: shift.openingFloat + cash + movementNet,
+           hasAllDetails: [...orderIds].every(id => state.orderDetailCache[id]) };
+}
+function openDrawerModal() {
+  const shift = openShiftFor(posBranchId());
+  if (!shift) return;
+  const moves = state.shiftMovements.filter(m => m.shiftId === shift.id);
+  openModal('Drawer — ' + branchName(shift.branchId), `
+    <div class="space-y-4">
+      <div class="grid grid-cols-2 gap-2">
+        <button onclick="openMovementModal('pay_in')" class="btn btn-ghost !py-3">Pay In</button>
+        <button onclick="openMovementModal('pay_out')" class="btn btn-ghost !py-3">Pay Out</button>
+        <button onclick="openMovementModal('cash_drop')" class="btn btn-ghost !py-3">Cash Drop</button>
+        <button onclick="doSpotCheck()" class="btn btn-ghost !py-3">Cash Spot Check</button>
+      </div>
+      ${moves.length ? `
+      <div class="border-t border-slate-100 pt-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-2">This shift</div>
+        <div class="space-y-1.5 text-sm max-h-56 overflow-y-auto">
+          ${moves.map(m => `
+            <div class="flex justify-between gap-2">
+              <span class="text-slate-600">${MOVEMENT_TYPES[m.type] || m.type}${m.reason ? ` — ${escapeHTML(m.reason)}` : ''}${m.notes ? ` <span class="text-[10px] text-slate-400">${escapeHTML(m.notes)}</span>` : ''}</span>
+              <span class="font-semibold tabular-nums ${movementDelta(m) < 0 ? 'text-rose-600' : movementDelta(m) > 0 ? 'text-emerald-700' : 'text-slate-400'}">${movementDelta(m) === 0 ? '—' : (movementDelta(m) > 0 ? '+' : '') + fmtMoney(movementDelta(m))}</span>
+            </div>`).join('')}
+        </div>
+      </div>` : '<div class="text-xs text-slate-400">No drawer movements this shift.</div>'}
+    </div>`, null);
+}
+function openMovementModal(type) {
+  const shift = openShiftFor(posBranchId());
+  if (!shift) return;
+  openModal(MOVEMENT_TYPES[type] + ' — ' + branchName(shift.branchId), `
+    <div class="space-y-3">
+      <div><label class="label">Amount (${escapeHTML(state.settings.currency)})</label>
+        <input id="mv-amount" type="number" min="0" step="0.05" class="input !text-lg" placeholder="0.00"></div>
+      <div><label class="label">Reason</label><input id="mv-reason" class="input" placeholder="${type === 'pay_out' ? 'e.g. supplier COD, ice delivery' : type === 'cash_drop' ? 'e.g. excess cash to safe' : 'e.g. change top-up'}"></div>
+      <div><label class="label">Notes (optional)</label><input id="mv-notes" class="input"></div>
+    </div>`, async () => {
+    const amount = parseFloat($('#mv-amount').value);
+    const reason = $('#mv-reason').value.trim();
+    if (isNaN(amount) || amount <= 0) { toast('Enter the amount', 'error'); return false; }
+    if (!reason) { toast('A reason is required', 'error'); return false; }
+    return saveMovement(shift, type, amount, reason, $('#mv-notes').value.trim());
+  }, { saveLabel: 'Save' });
+}
+async function doSpotCheck() {
+  const shift = openShiftFor(posBranchId());
+  if (!shift) return;
+  await loadShiftCashDetails(shift);
+  const exp = shiftExpectedCash(shift);
+  openModal('Cash Spot Check — ' + branchName(shift.branchId), `
+    <div class="space-y-3">
+      <div class="bg-slate-50 rounded-xl p-3 text-sm flex justify-between"><span class="text-slate-600">Expected in drawer right now</span><span class="font-bold">${fmtMoney(exp.expected)}</span></div>
+      <div><label class="label">Counted cash</label>
+        <input id="sc-counted" type="number" min="0" step="0.05" class="input !text-lg" oninput="updateOverShort(${exp.expected.toFixed(2)})"></div>
+      <div id="till-overshort" class="text-sm font-semibold text-slate-600">Over/short: —</div>
+    </div>`, async () => {
+    const counted = parseFloat($('#sc-counted').value);
+    if (isNaN(counted) || counted < 0) { toast('Count the drawer first', 'error'); return false; }
+    const os = counted - exp.expected;
+    return saveMovement(shift, 'spot_check', counted, 'Mid-shift count',
+      `expected ${exp.expected.toFixed(2)}, ${Math.abs(os) < 0.005 ? 'balanced' : (os > 0 ? 'over +' : 'short −') + Math.abs(os).toFixed(2)}`);
+  }, { saveLabel: 'Record check' });
+}
+async function saveMovement(shift, type, amount, reason, notes) {
+  const me = currentStaff();
+  const { data, error } = await sb.from('shift_movements').insert({
+    shift_id: shift.id, type, amount: +amount.toFixed(2), reason: reason || null,
+    notes: notes || null, created_by: me?.id || null,
+  }).select().single();
+  if (error) { toast(humanizeError(error), 'error'); return false; }
+  state.shiftMovements.unshift(mapShiftMovementFromDb(data));
+  render(); toast(MOVEMENT_TYPES[type] + ' recorded', 'success');
+  return true;
 }
 async function loadShiftCashDetails(shift) {
   // Pull payment rows for any of this shift's orders not yet cached.
@@ -587,13 +712,15 @@ async function openCloseTillModal() {
   if (!shift) return;
   await loadShiftCashDetails(shift);
   const exp = shiftExpectedCash(shift);
-  const expected = exp.float + exp.cash;
+  const expected = exp.expected;
   const orders = state.orders.filter(o => o.shiftId === shift.id && o.status === 'completed');
   openModal('Close till — ' + branchName(branchId), `
     <div class="space-y-3">
       <div class="bg-slate-50 rounded-xl p-4 text-sm space-y-1">
         <div class="flex justify-between text-slate-600"><span>Opening float</span><span>${fmtMoney(exp.float)}</span></div>
         <div class="flex justify-between text-slate-600"><span>Cash sales (${orders.length} orders this shift)</span><span>${fmtMoney(exp.cash)}</span></div>
+        ${exp.moves.some(m => movementDelta(m) !== 0) ? `
+        <div class="flex justify-between text-slate-600"><span>Drawer movements (${exp.moves.filter(m => movementDelta(m) !== 0).length})</span><span>${exp.movementNet > 0 ? '+' : ''}${fmtMoney(exp.movementNet)}</span></div>` : ''}
         <div class="flex justify-between font-bold text-slate-900 border-t border-slate-200 pt-1"><span>Expected in drawer</span><span>${fmtMoney(expected)}</span></div>
       </div>
       <div><label class="label">Counted cash (${escapeHTML(state.settings.currency)})</label>
@@ -716,7 +843,7 @@ async function saveOrder() {
     subtotal: +t.subtotal.toFixed(2), vat_amount: +t.vat.toFixed(2), total: +t.total.toFixed(2), cashier_id: me?.id || null,
     order_type: posOrderType, discount_amount: +t.discount.toFixed(2),
     discount_reason: t.discount > 0 ? (posDiscount?.reason || null) : null,
-    shift_id: shift.id };
+    shift_id: shift.id, note: posOrderNote || null };
 
   // Insert; the DB trigger assigns order_no. Concurrent cashiers on one
   // branch can collide on the unique (branch, date, no) — retry once.
@@ -741,7 +868,7 @@ async function saveOrder() {
   const mapped = mapOrderFromDb(order);
   state.orders.unshift(mapped);
   state.orderDetailCache[order.id] = { items: lineRows.map(mapOrderItemFromDb), payments: payments.map((p,i) => mapPaymentFromDb({ ...p, id:'tmp'+i, order_id: order.id })) };
-  posCart = []; posDiscount = null; posOrderType = 'pickup';
+  posCart = []; posDiscount = null; posOrderType = 'pickup'; posOrderNote = '';
   render();
   toast(`Order #${mapped.orderNo} completed`, 'success');
   printReceipt(mapped.id);
@@ -865,6 +992,7 @@ async function printReceipt(orderId) {
     <div class="row"><span>Simplified Tax Invoice</span><span class="ar">فاتورة ضريبية مبسطة</span></div>
     <div class="row"><span class="b">Order #${order.orderNo}</span><span>${fmtDateTime(order.createdAt)}</span></div>
     <div class="row"><span>${ORDER_TYPES[order.orderType] || 'Pickup'}</span><span>${escapeHTML(staffName(order.cashierId))}</span></div>
+    ${order.note ? `<div class="b" style="margin-top:2px">📝 ${escapeHTML(order.note)}</div>` : ''}
     ${order.status === 'void' ? '<div class="c b" style="font-size:13px">*** VOID ***</div>' : ''}
     ${order.status === 'returned' ? '<div class="c b" style="font-size:13px">*** RETURNED / مرتجع ***</div>' : ''}
     <hr>
