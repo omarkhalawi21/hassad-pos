@@ -641,6 +641,68 @@ CREATE POLICY "item_modifier_groups_delete_roles"
   ON public.item_modifier_groups FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
 
 -- =============================================================
+-- 9. PRODUCT PROFILES: per-assignment modifier min/max + menu groups
+--    Foodics attaches min/max PER PRODUCT-modifier assignment (Hot or
+--    Iced = 1/1 on a V60 cup, Extra Grams = 0/1), not on the group.
+--    min_select >= 1 means required; max_select > 1 lets the picker
+--    multi-select up to the cap. menu_groups mirror Foodics "Groups"
+--    (channel menus: Koinz Menu, Taker) -- no runtime effect in the
+--    POS yet, but memberships are captured now so the phase-2
+--    aggregator API can filter by them.
+-- =============================================================
+ALTER TABLE public.item_modifier_groups ADD COLUMN IF NOT EXISTS min_select int not null default 0;
+ALTER TABLE public.item_modifier_groups ADD COLUMN IF NOT EXISTS max_select int not null default 1;
+-- Backfill: assignments of groups marked required default to min 1.
+UPDATE public.item_modifier_groups img
+   SET min_select = 1
+  FROM public.modifier_groups g
+ WHERE g.id = img.group_id AND g.required AND img.min_select = 0;
+
+CREATE TABLE IF NOT EXISTS public.menu_groups (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null unique,
+  active      boolean not null default true,
+  created_at  timestamptz not null default now()
+);
+CREATE TABLE IF NOT EXISTS public.item_menu_groups (
+  item_id   uuid not null references public.menu_items(id) on delete cascade,
+  group_id  uuid not null references public.menu_groups(id) on delete cascade,
+  PRIMARY KEY (item_id, group_id)
+);
+INSERT INTO public.menu_groups (name)
+SELECT v.name FROM (VALUES ('Koinz Menu'), ('Taker')) AS v(name)
+WHERE NOT EXISTS (SELECT 1 FROM public.menu_groups m WHERE m.name = v.name);
+
+ALTER TABLE public.menu_groups      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_menu_groups ENABLE ROW LEVEL SECURITY;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT schemaname, tablename, policyname FROM pg_policies
+           WHERE schemaname='public' AND tablename IN ('menu_groups','item_menu_groups') LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', r.policyname, r.schemaname, r.tablename);
+  END LOOP;
+END $$;
+CREATE POLICY "menu_groups_select_authenticated"
+  ON public.menu_groups FOR SELECT TO authenticated USING (true);
+CREATE POLICY "menu_groups_insert_roles"
+  ON public.menu_groups FOR INSERT TO authenticated WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "menu_groups_update_roles"
+  ON public.menu_groups FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "menu_groups_delete_roles"
+  ON public.menu_groups FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "item_menu_groups_select_authenticated"
+  ON public.item_menu_groups FOR SELECT TO authenticated USING (true);
+CREATE POLICY "item_menu_groups_insert_roles"
+  ON public.item_menu_groups FOR INSERT TO authenticated WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "item_menu_groups_update_roles"
+  ON public.item_menu_groups FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "item_menu_groups_delete_roles"
+  ON public.item_menu_groups FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that

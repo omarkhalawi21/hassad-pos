@@ -97,7 +97,8 @@ function emptyState() {
     settings: { companyName:'Hassad Coffee Roasters', companyNameAr:'', vatNumber:'', crNumber:'', currency:'SAR', vatRate:15, receiptFooterEn:'', receiptFooterAr:'' },
     settingsId: null,
     branches: [], staff: [], categories: [], items: [], branchOff: [],
-    modGroups: [], modOptions: [], itemModGroups: [],  // [{itemId, groupId}]
+    modGroups: [], modOptions: [], itemModGroups: [],  // [{itemId, groupId, minSelect, maxSelect}]
+    menuGroups: [], itemMenuGroups: [],                // channel menus (Koinz Menu, Taker)
     orders: [],           // capped recent window (today + last 7 days)
     shifts: [],           // open shifts + last 7 days of closed ones
     shiftMovements: [],   // drawer movements for the loaded shifts window
@@ -184,7 +185,7 @@ function staffName(id) { const s = state.staff.find(x => x.id === id); return s 
 /* -------------------- DATA LOAD -------------------- */
 async function loadAll() {
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR] = await Promise.all([
+  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR, menuGroupsR, itemMenuGroupsR] = await Promise.all([
     sb.from('pos_settings').select('*').limit(1).maybeSingle(),
     sb.from('branches').select('*').order('name'),
     sb.from('staff').select('*').order('first_name'),
@@ -206,6 +207,8 @@ async function loadAll() {
     sb.from('modifier_groups').select('*').order('sort_order'),
     sb.from('modifier_options').select('*').order('sort_order'),
     sb.from('item_modifier_groups').select('*'),
+    sb.from('menu_groups').select('*').order('name'),
+    sb.from('item_menu_groups').select('*'),
   ]);
   if (settingsR.data) { const s = mapSettingsFromDb(settingsR.data); state.settingsId = s._id; state.settings = s; }
   state.branches   = (branchesR.data   || []).map(mapBranchFromDb);
@@ -218,7 +221,10 @@ async function loadAll() {
   state.shiftMovements = (movementsR?.data || []).map(mapShiftMovementFromDb);
   state.modGroups      = (modGroupsR?.data  || []).map(mapModGroupFromDb);
   state.modOptions     = (modOptionsR?.data || []).map(mapModOptionFromDb);
-  state.itemModGroups  = (itemModsR?.data   || []).map(r => ({ itemId: r.item_id, groupId: r.group_id }));
+  state.itemModGroups  = (itemModsR?.data   || []).map(r => ({ itemId: r.item_id, groupId: r.group_id,
+    minSelect: Number(r.min_select) || 0, maxSelect: Math.max(1, Number(r.max_select) || 1) }));
+  state.menuGroups     = (menuGroupsR?.data || []).map(r => ({ id: r.id, name: r.name || '', active: !!r.active }));
+  state.itemMenuGroups = (itemMenuGroupsR?.data || []).map(r => ({ itemId: r.item_id, groupId: r.group_id }));
 }
 async function loadOrderDetail(orderId) {
   if (state.orderDetailCache[orderId]) return state.orderDetailCache[orderId];
@@ -271,11 +277,14 @@ async function logout() {
 }
 
 /* -------------------- ROUTING / SHELL -------------------- */
-const routes = ['dashboard', 'pos', 'orders', 'menu', 'branches', 'staff', 'settings'];
+const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'branches', 'staff', 'settings'];
 let authMode = 'login';
 function getRoute() {
   const h = (location.hash || '').replace(/^#\/?/, '').split('/')[0];
   return routes.includes(h) ? h : (hasRole('cashier') ? 'pos' : 'dashboard');
+}
+function getRouteArg() {
+  return (location.hash || '').replace(/^#\/?/, '').split('/')[1] || '';
 }
 window.addEventListener('hashchange', () => render());
 
@@ -314,6 +323,7 @@ function renderMain() {
     case 'orders':    content = renderOrders(); break;
     case 'dashboard': content = hasRole('admin','manager') ? renderDashboard() : renderPos(); break;
     case 'menu':      content = hasRole('admin','manager') ? renderMenu() : renderPos(); break;
+    case 'item':      content = hasRole('admin','manager') ? renderItemProfile(getRouteArg()) : renderPos(); break;
     case 'branches':  content = isAdmin() ? renderBranches() : renderPos(); break;
     case 'staff':     content = isAdmin() ? renderStaff() : renderPos(); break;
     case 'settings':  content = isAdmin() ? renderSettings() : renderPos(); break;
@@ -452,13 +462,18 @@ function cartTotals() {
   const vat = vatPortion(total, state.settings.vatRate);
   return { gross, discount, total, vat, subtotal: total - vat };
 }
-// Active modifier groups assigned to an item (each with its active options).
+// Active modifier groups assigned to an item, carrying the per-assignment
+// min/max (Foodics semantics: min>=1 = required, max>1 = multi-select).
 function itemModifierGroups(itemId) {
-  const gids = state.itemModGroups.filter(x => x.itemId === itemId).map(x => x.groupId);
-  return state.modGroups
-    .filter(g => g.active && gids.includes(g.id))
-    .map(g => ({ ...g, options: state.modOptions.filter(o => o.groupId === g.id && o.active).sort((a,b) => a.sortOrder - b.sortOrder) }))
-    .filter(g => g.options.length)
+  const assigns = state.itemModGroups.filter(x => x.itemId === itemId);
+  return assigns
+    .map(a => {
+      const g = state.modGroups.find(x => x.id === a.groupId && x.active);
+      if (!g) return null;
+      return { ...g, minSelect: a.minSelect ?? (g.required ? 1 : 0), maxSelect: a.maxSelect || 1,
+        options: state.modOptions.filter(o => o.groupId === g.id && o.active).sort((x,y) => x.sortOrder - y.sortOrder) };
+    })
+    .filter(g => g && g.options.length)
     .sort((a,b) => a.sortOrder - b.sortOrder);
 }
 function pushCartLine(it, mods) {
@@ -480,11 +495,12 @@ function addToCart(itemId) {
     <div class="mb-4">
       <div class="text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
         ${escapeHTML(g.nameEn)}${g.nameAr ? ` <span dir="rtl">${escapeHTML(g.nameAr)}</span>` : ''}
-        ${g.required ? '<span class="text-rose-500">*</span>' : ''}
+        ${g.minSelect >= 1 ? '<span class="text-rose-500">*</span>' : ''}
+        ${g.maxSelect > 1 ? `<span class="text-slate-400 normal-case">(up to ${g.maxSelect})</span>` : ''}
       </div>
       <div class="flex gap-1.5 flex-wrap" id="pick-${g.id}">
         ${g.options.map(o => `
-          <button type="button" onclick="pickOption('${g.id}','${o.id}')" id="opt-${o.id}"
+          <button type="button" onclick="pickOption('${g.id}','${o.id}',${g.maxSelect})" id="opt-${o.id}"
             class="px-3 py-2 rounded-xl text-sm font-semibold border bg-white text-slate-600 border-slate-200">
             ${escapeHTML(o.nameEn)}${o.nameAr ? ` <span dir="rtl" class="text-xs">${escapeHTML(o.nameAr)}</span>` : ''}${o.priceDelta ? ` <span class="text-brand-700">+${fmtMoney(o.priceDelta)}</span>` : ''}
           </button>`).join('')}
@@ -492,9 +508,10 @@ function addToCart(itemId) {
     </div>`).join('');
   openModal(it.nameEn + (it.nameAr ? ' — ' + it.nameAr : ''), body, async () => {
     for (const g of groups) {
-      if (g.required && !_pickerSel?.[g.id]) { toast(`Choose: ${g.nameEn}`, 'error'); return false; }
+      const n = (_pickerSel?.[g.id] || []).length;
+      if (n < g.minSelect) { toast(`Choose ${g.minSelect > 1 ? 'at least ' + g.minSelect + ' — ' : ''}${g.nameEn}`, 'error'); return false; }
     }
-    const mods = groups.map(g => _pickerSel?.[g.id]).filter(Boolean);
+    const mods = groups.flatMap(g => _pickerSel?.[g.id] || []);
     pushCartLine(it, mods);
     return true;
   }, { saveLabel: 'Add to order' });
@@ -502,14 +519,21 @@ function addToCart(itemId) {
   // initializing it earlier leaves taps writing into null.
   _pickerSel = {};
 }
-function pickOption(groupId, optionId) {
+function pickOption(groupId, optionId, maxSelect = 1) {
   if (!_pickerSel) _pickerSel = {};
   const opt = state.modOptions.find(o => o.id === optionId);
-  // Tap again to unpick (optional groups); picking replaces within the group.
-  const prev = _pickerSel?.[groupId];
-  _pickerSel[groupId] = (prev && prev.id === optionId) ? null : opt;
+  const sel = _pickerSel[groupId] || [];
+  if (sel.some(o => o.id === optionId)) {
+    _pickerSel[groupId] = sel.filter(o => o.id !== optionId);          // tap again = unpick
+  } else if (maxSelect <= 1) {
+    _pickerSel[groupId] = [opt];                                       // radio behavior
+  } else if (sel.length < maxSelect) {
+    _pickerSel[groupId] = [...sel, opt];                               // multi up to the cap
+  } else {
+    toast(`Up to ${maxSelect} for this group`, 'error'); return;
+  }
   document.querySelectorAll(`#pick-${CSS.escape(groupId)} button`).forEach(b => {
-    const on = _pickerSel[groupId] && b.id === 'opt-' + _pickerSel[groupId].id;
+    const on = (_pickerSel[groupId] || []).some(o => 'opt-' + o.id === b.id);
     b.className = `px-3 py-2 rounded-xl text-sm font-semibold border ${on ? 'bg-brand-700 text-white border-brand-700' : 'bg-white text-slate-600 border-slate-200'}`;
   });
 }
@@ -1182,14 +1206,157 @@ function renderMenu() {
           ${items.map(i => `
             <div class="px-5 py-2.5 flex items-center gap-3 text-sm ${i.active ? '' : 'opacity-50'}">
               ${safePhoto(i.photo) ? `<img src="${safePhoto(i.photo)}" class="w-9 h-9 rounded-lg object-cover" alt="">` : '<div class="w-9 h-9 rounded-lg bg-brand-50"></div>'}
-              <div class="flex-1"><span class="font-medium">${escapeHTML(i.nameEn)}</span>${i.nameAr ? ` <span class="text-slate-400" dir="rtl">${escapeHTML(i.nameAr)}</span>` : ''}${i.sku ? ` <span class="text-[10px] text-slate-400">${escapeHTML(i.sku)}</span>` : ''}${i.active ? '' : ' <span class="badge badge-slate">Off</span>'}</div>
+              <div class="flex-1"><a href="#/item/${i.id}" class="font-medium hover:text-brand-700 hover:underline">${escapeHTML(i.nameEn)}</a>${i.nameAr ? ` <span class="text-slate-400" dir="rtl">${escapeHTML(i.nameAr)}</span>` : ''}${i.sku ? ` <span class="text-[10px] text-slate-400">${escapeHTML(i.sku)}</span>` : ''}${i.active ? '' : ' <span class="badge badge-slate">Off</span>'}${itemModifierGroups(i.id).length ? ` <span class="badge badge-slate">${itemModifierGroups(i.id).length} mod</span>` : ''}</div>
               <div class="font-semibold">${fmtMoney(i.price)}</div>
+              <a href="#/item/${i.id}" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Profile</a>
               <button onclick="openItemModal('${i.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
             </div>`).join('') || '<div class="px-5 py-4 text-sm text-slate-400">No items yet.</div>'}
         </div>
       </div>`;
     }).join('') || '<div class="bg-white rounded-2xl shadow-card p-10 text-center text-slate-400">Start by adding a category.</div>'}`;
 }
+/* -------------------- PRODUCT PROFILE -------------------- */
+function renderItemProfile(id) {
+  const it = state.items.find(i => i.id === id);
+  if (!it) return `<div class="bg-white rounded-2xl shadow-card p-10 text-center text-slate-400">Product not found. <a href="#/menu" class="text-brand-700 hover:underline">Back to Menu</a></div>`;
+  const cat = state.categories.find(c => c.id === it.categoryId);
+  const assignments = state.itemModGroups.filter(x => x.itemId === id);
+  const offSet = new Set(state.branchOff.filter(o => o.itemId === id).map(o => o.branchId));
+  const memberOf = new Set(state.itemMenuGroups.filter(x => x.itemId === id).map(x => x.groupId));
+  const field = (label, value) => `<div><div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">${label}</div><div class="font-medium mt-0.5">${value || '—'}</div></div>`;
+  return `
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div class="flex items-center gap-3">
+        <a href="#/menu" class="btn btn-ghost !py-1.5 !px-3">← Menu</a>
+        <h2 class="font-display text-2xl font-semibold text-slate-900">${escapeHTML(it.nameEn)}</h2>
+        ${it.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}
+      </div>
+      <div class="flex gap-2">
+        <button onclick="toggleItemActive('${it.id}')" class="btn btn-ghost">${it.active ? 'Deactivate' : 'Activate'}</button>
+        <button onclick="openItemModal('${it.id}')" class="btn btn-primary">Edit Product</button>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-2xl shadow-card p-6 mb-4">
+      <div class="flex gap-5 flex-wrap">
+        ${safePhoto(it.photo) ? `<img src="${safePhoto(it.photo)}" class="w-28 h-28 rounded-2xl object-cover">` : '<div class="w-28 h-28 rounded-2xl bg-brand-50"></div>'}
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-x-10 gap-y-4 flex-1">
+          ${field('Name', escapeHTML(it.nameEn))}
+          ${field('Name (Arabic)', it.nameAr ? `<span dir="rtl">${escapeHTML(it.nameAr)}</span>` : '')}
+          ${field('Category', escapeHTML(cat?.nameEn || '—') + (cat?.nameAr ? ` <span dir="rtl" class="text-slate-400">${escapeHTML(cat.nameAr)}</span>` : ''))}
+          ${field('SKU', escapeHTML(it.sku))}
+          ${field('Price (incl. VAT)', fmtMoney(it.price) + ' ' + escapeHTML(state.settings.currency))}
+          ${field('Available at', state.branches.filter(b => b.active && !offSet.has(b.id)).map(b => escapeHTML(b.name)).join(', ') || 'No branches')}
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-2xl shadow-card overflow-hidden mb-4">
+      <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+        <h3 class="font-display font-semibold text-slate-900">Modifiers</h3>
+        <button onclick="openAssignModifierModal('${it.id}')" class="btn btn-ghost !py-1.5 !px-3 !text-xs">+ Add modifier</button>
+      </div>
+      ${assignments.length ? `
+      <table class="w-full text-sm">
+        <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
+          <th class="text-start px-5 py-2">Name</th><th class="text-center px-3 py-2">Min</th><th class="text-center px-3 py-2">Max</th>
+          <th class="text-start px-3 py-2">Options</th><th class="px-3 py-2"></th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${assignments.map(a => {
+            const g = state.modGroups.find(x => x.id === a.groupId);
+            if (!g) return '';
+            const opts = state.modOptions.filter(o => o.groupId === g.id && o.active);
+            return `
+            <tr>
+              <td class="px-5 py-2.5 font-medium">${escapeHTML(g.nameEn)}${g.nameAr ? ` <span dir="rtl" class="text-slate-400 text-xs">${escapeHTML(g.nameAr)}</span>` : ''}${a.minSelect >= 1 ? ' <span class="badge badge-amber">Required</span>' : ''}</td>
+              <td class="px-3 py-2.5 text-center tabular-nums">${a.minSelect}</td>
+              <td class="px-3 py-2.5 text-center tabular-nums">${a.maxSelect}</td>
+              <td class="px-3 py-2.5 text-xs text-slate-500">${opts.slice(0, 4).map(o => escapeHTML(o.nameEn)).join(', ')}${opts.length > 4 ? ` +${opts.length - 4}` : ''}</td>
+              <td class="px-3 py-2.5 text-end whitespace-nowrap">
+                <button onclick="editAssignmentMinMax('${it.id}','${g.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Min/Max</button>
+                <button onclick="removeModifierAssignment('${it.id}','${g.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Remove</button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>` : '<div class="px-5 py-6 text-sm text-slate-400">No modifier prompts on this product.</div>'}
+    </div>
+
+    <div class="bg-white rounded-2xl shadow-card p-5">
+      <h3 class="font-display font-semibold text-slate-900 mb-3">Groups <span class="text-xs font-normal text-slate-400">(channel menus — used by aggregator integrations)</span></h3>
+      <div class="flex gap-3 flex-wrap">
+        ${state.menuGroups.filter(g => g.active).map(g => `
+          <label class="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" onchange="toggleItemMenuGroup('${it.id}','${g.id}', this.checked)" ${memberOf.has(g.id) ? 'checked' : ''}> ${escapeHTML(g.name)}
+          </label>`).join('') || '<span class="text-sm text-slate-400">No menu groups defined.</span>'}
+      </div>
+    </div>`;
+}
+async function toggleItemActive(itemId) {
+  const it = state.items.find(i => i.id === itemId); if (!it) return;
+  const { error } = await sb.from('menu_items').update({ active: !it.active }).eq('id', itemId);
+  if (error) { toast(humanizeError(error), 'error'); return; }
+  it.active = !it.active; render(); toast(it.active ? 'Activated' : 'Deactivated', 'success');
+}
+function openAssignModifierModal(itemId) {
+  const assigned = new Set(state.itemModGroups.filter(x => x.itemId === itemId).map(x => x.groupId));
+  const candidates = state.modGroups.filter(g => g.active && !assigned.has(g.id)).sort((a,b) => a.sortOrder - b.sortOrder);
+  if (!candidates.length) { toast('All active modifier groups are already assigned', 'info'); return; }
+  openModal('Add modifier', `
+    <div class="space-y-3">
+      <div><label class="label">Modifier group</label>
+        <select id="am-group" class="input">${candidates.map(g => `<option value="${g.id}">${escapeHTML(g.nameEn)}${g.nameAr ? ' — ' + escapeHTML(g.nameAr) : ''}</option>`).join('')}</select></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Minimum options</label><input id="am-min" type="number" min="0" step="1" class="input" value="0"></div>
+        <div><label class="label">Maximum options</label><input id="am-max" type="number" min="1" step="1" class="input" value="1"></div>
+      </div>
+      <div class="text-xs text-slate-500">Min ≥ 1 makes the prompt required. Max > 1 lets the cashier pick several options.</div>
+    </div>`, async () => {
+    const groupId = $('#am-group').value;
+    const minS = Math.max(0, parseInt($('#am-min').value) || 0);
+    const maxS = Math.max(1, parseInt($('#am-max').value) || 1);
+    if (minS > maxS) { toast('Min cannot exceed max', 'error'); return false; }
+    const { error } = await sb.from('item_modifier_groups').insert({ item_id: itemId, group_id: groupId, min_select: minS, max_select: maxS });
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    state.itemModGroups.push({ itemId, groupId, minSelect: minS, maxSelect: maxS });
+    render(); toast('Modifier added', 'success');
+  }, { saveLabel: 'Add' });
+}
+function editAssignmentMinMax(itemId, groupId) {
+  const a = state.itemModGroups.find(x => x.itemId === itemId && x.groupId === groupId); if (!a) return;
+  const g = state.modGroups.find(x => x.id === groupId);
+  openModal('Min/Max — ' + (g?.nameEn || ''), `
+    <div class="grid grid-cols-2 gap-3">
+      <div><label class="label">Minimum options</label><input id="mm-min" type="number" min="0" step="1" class="input" value="${a.minSelect}"></div>
+      <div><label class="label">Maximum options</label><input id="mm-max" type="number" min="1" step="1" class="input" value="${a.maxSelect}"></div>
+    </div>`, async () => {
+    const minS = Math.max(0, parseInt($('#mm-min').value) || 0);
+    const maxS = Math.max(1, parseInt($('#mm-max').value) || 1);
+    if (minS > maxS) { toast('Min cannot exceed max', 'error'); return false; }
+    const { error } = await sb.from('item_modifier_groups').update({ min_select: minS, max_select: maxS })
+      .eq('item_id', itemId).eq('group_id', groupId);
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    a.minSelect = minS; a.maxSelect = maxS;
+    render(); toast('Saved', 'success');
+  });
+}
+async function removeModifierAssignment(itemId, groupId) {
+  const { error } = await sb.from('item_modifier_groups').delete().eq('item_id', itemId).eq('group_id', groupId);
+  if (error) { toast(humanizeError(error), 'error'); return; }
+  state.itemModGroups = state.itemModGroups.filter(x => !(x.itemId === itemId && x.groupId === groupId));
+  render(); toast('Removed', 'success');
+}
+async function toggleItemMenuGroup(itemId, groupId, on) {
+  const q = on
+    ? sb.from('item_menu_groups').insert({ item_id: itemId, group_id: groupId })
+    : sb.from('item_menu_groups').delete().eq('item_id', itemId).eq('group_id', groupId);
+  const { error } = await q;
+  if (error) { toast(humanizeError(error), 'error'); render(); return; }
+  if (on) state.itemMenuGroups.push({ itemId, groupId });
+  else state.itemMenuGroups = state.itemMenuGroups.filter(x => !(x.itemId === itemId && x.groupId === groupId));
+  toast('Saved', 'success');
+}
+
 function openCategoryModal(id) {
   const editing = id ? state.categories.find(c => c.id === id) : null;
   openModal(editing ? 'Edit category' : 'New category', `
