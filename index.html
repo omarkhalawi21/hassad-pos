@@ -98,6 +98,7 @@ function emptyState() {
     settingsId: null,
     branches: [], staff: [], categories: [], items: [], branchOff: [],
     orders: [],           // capped recent window (today + last 7 days)
+    shifts: [],           // open shifts + last 7 days of closed ones
     orderDetailCache: {}, // orderId → { items:[], payments:[] } fetched on demand for receipts
   };
 }
@@ -113,17 +114,29 @@ function mapStaffFromDb(r) {
   return { id: r.id, userId: r.user_id, email: r.email || '', firstName: r.first_name || '', lastName: r.last_name || '',
     role: r.role || 'cashier', branchId: r.branch_id, active: !!r.active };
 }
-function mapCategoryFromDb(r) { return { id: r.id, nameEn: r.name_en || '', nameAr: r.name_ar || '', sortOrder: Number(r.sort_order) || 0, active: !!r.active }; }
+function mapCategoryFromDb(r) { return { id: r.id, nameEn: r.name_en || '', nameAr: r.name_ar || '', reference: r.reference || '', sortOrder: Number(r.sort_order) || 0, active: !!r.active }; }
 function mapItemFromDb(r) {
   return { id: r.id, categoryId: r.category_id, nameEn: r.name_en || '', nameAr: r.name_ar || '',
-    price: Number(r.price) || 0, sku: r.sku || '', sortOrder: Number(r.sort_order) || 0, active: !!r.active };
+    price: Number(r.price) || 0, sku: r.sku || '', photo: r.photo || '', sortOrder: Number(r.sort_order) || 0, active: !!r.active };
 }
+function mapShiftFromDb(r) {
+  return { id: r.id, branchId: r.branch_id, businessDate: r.business_date, status: r.status || 'open',
+    openingFloat: Number(r.opening_float) || 0, openedBy: r.opened_by, openedAt: r.opened_at,
+    closedBy: r.closed_by, closedAt: r.closed_at,
+    expectedCash: r.expected_cash == null ? null : Number(r.expected_cash),
+    countedCash: r.counted_cash == null ? null : Number(r.counted_cash),
+    overShort: r.over_short == null ? null : Number(r.over_short), notes: r.notes || '' };
+}
+// Small resized product photos only; validated before every <img> injection.
+const PHOTO_DATA_URL_RE = /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/;
+function safePhoto(p) { return p && PHOTO_DATA_URL_RE.test(p) ? p : ''; }
 function mapOrderFromDb(r) {
   return { id: r.id, branchId: r.branch_id, businessDate: r.business_date, orderNo: Number(r.order_no) || 0,
     status: r.status || 'completed', subtotal: Number(r.subtotal) || 0, vatAmount: Number(r.vat_amount) || 0,
     total: Number(r.total) || 0, cashierId: r.cashier_id, voidReason: r.void_reason || '', createdAt: r.created_at,
     orderType: r.order_type || 'pickup', discountAmount: Number(r.discount_amount) || 0,
-    discountReason: r.discount_reason || '', returnedAt: r.returned_at, returnedBy: r.returned_by };
+    discountReason: r.discount_reason || '', returnedAt: r.returned_at, returnedBy: r.returned_by,
+    shiftId: r.shift_id || null };
 }
 const ORDER_TYPES = { pickup: 'Pickup', dine_in: 'Dine-in', delivery: 'Delivery', drive_thru: 'Drive-thru' };
 function mapOrderItemFromDb(r) {
@@ -150,7 +163,7 @@ function staffName(id) { const s = state.staff.find(x => x.id === id); return s 
 /* -------------------- DATA LOAD -------------------- */
 async function loadAll() {
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR] = await Promise.all([
+  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR] = await Promise.all([
     sb.from('pos_settings').select('*').limit(1).maybeSingle(),
     sb.from('branches').select('*').order('name'),
     sb.from('staff').select('*').order('first_name'),
@@ -161,6 +174,11 @@ async function loadAll() {
     // stays in the DB (reports can query on demand later).
     sb.from('orders').select('*').gte('business_date', weekAgo.toISOString().slice(0,10))
       .order('created_at', { ascending: false }).limit(1000),
+    // Open shifts regardless of age (an accidentally-left-open till must
+    // surface), plus the recent closed window for the dashboard.
+    sb.from('shifts').select('*')
+      .or(`status.eq.open,opened_at.gte.${weekAgo.toISOString()}`)
+      .order('opened_at', { ascending: false }).limit(200),
   ]);
   if (settingsR.data) { const s = mapSettingsFromDb(settingsR.data); state.settingsId = s._id; state.settings = s; }
   state.branches   = (branchesR.data   || []).map(mapBranchFromDb);
@@ -169,6 +187,7 @@ async function loadAll() {
   state.items      = (itemsR.data      || []).map(mapItemFromDb);
   state.branchOff  = (offR.data        || []).map(r => ({ itemId: r.item_id, branchId: r.branch_id }));
   state.orders     = (ordersR.data     || []).map(mapOrderFromDb);
+  state.shifts     = (shiftsR?.data    || []).map(mapShiftFromDb);
 }
 async function loadOrderDetail(orderId) {
   if (state.orderDetailCache[orderId]) return state.orderDetailCache[orderId];
@@ -214,7 +233,7 @@ async function logout() {
   state = emptyState();
   // Shared-tablet hygiene: reset every module-level transient var.
   posCart = []; posCategoryId = null; posOrderType = 'pickup'; posDiscount = null;
-  _checkoutSplit = null; authMode = 'login';
+  _checkoutSplit = null; _itemPhoto = undefined; authMode = 'login';
   location.hash = '';
   render();
 }
@@ -360,6 +379,7 @@ function closeModal() {
   document.getElementById('modal-root')?.remove();
   modalOnSave = null;
   _checkoutSplit = null; // transient checkout state never bleeds into the next modal
+  if (typeof _itemPhoto !== 'undefined') _itemPhoto = undefined;
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('modal-root')) closeModal(); });
 
@@ -431,6 +451,17 @@ function openDiscountModal() {
 function renderPos() {
   const branchId = posBranchId();
   if (!branchId) return `<div class="bg-white rounded-2xl shadow-card p-10 text-center text-slate-500">No active branch. ${isAdmin() ? 'Add one under Branches.' : 'Ask the admin to assign you to a branch.'}</div>`;
+  const shift = openShiftFor(branchId);
+  if (!shift) {
+    const lastClosed = state.shifts.find(s => s.branchId === branchId && s.status === 'closed');
+    return `
+      <div class="max-w-md mx-auto bg-white rounded-2xl shadow-card p-8 text-center mt-8">
+        <h2 class="font-display text-2xl font-semibold text-slate-900">Till closed — ${escapeHTML(branchName(branchId))}</h2>
+        <p class="text-sm text-slate-500 mt-2">Open the till with your counted cash float to start selling.</p>
+        ${lastClosed ? `<div class="bg-slate-50 rounded-xl p-3 text-xs text-slate-600 mt-4">Last shift closed ${fmtDateTime(lastClosed.closedAt)} — ${lastClosed.overShort === 0 ? 'balanced ✓' : (lastClosed.overShort > 0 ? 'over +' : 'short −') + fmtMoney(Math.abs(lastClosed.overShort))}</div>` : ''}
+        <button onclick="openTillModal()" class="btn btn-primary w-full mt-5 !py-3 !text-base">Open till</button>
+      </div>`;
+  }
   const cats = state.categories.filter(c => c.active).sort((a,b) => a.sortOrder - b.sortOrder);
   if (!posCategoryId || !cats.some(c => c.id === posCategoryId)) posCategoryId = cats[0]?.id || null;
   const items = state.items
@@ -438,6 +469,11 @@ function renderPos() {
     .sort((a,b) => a.sortOrder - b.sortOrder);
   const t = cartTotals();
   return `
+    <div class="bg-white rounded-xl shadow-card px-4 py-2 mb-4 flex items-center gap-3 flex-wrap text-sm">
+      <span class="badge badge-green">Till open</span>
+      <span class="text-slate-500">since ${fmtDateTime(shift.openedAt)} · float ${fmtMoney(shift.openingFloat)} · ${escapeHTML(staffName(shift.openedBy))}</span>
+      <button onclick="openCloseTillModal()" class="btn btn-ghost !py-1 !px-3 !text-xs ms-auto">Close till</button>
+    </div>
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2">
         <div class="flex gap-1 overflow-x-auto pb-2 mb-3">
@@ -445,10 +481,13 @@ function renderPos() {
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
           ${items.map(i => `
-            <button onclick="addToCart('${i.id}')" class="pos-item bg-white rounded-2xl shadow-card p-4 text-start hover:shadow-pop">
-              <div class="font-semibold text-slate-900 leading-snug">${escapeHTML(i.nameEn)}</div>
-              ${i.nameAr ? `<div class="text-xs text-slate-500 mt-0.5" dir="rtl">${escapeHTML(i.nameAr)}</div>` : ''}
-              <div class="text-brand-700 font-bold mt-2">${fmtMoney(i.price)} <span class="text-xs font-medium">${escapeHTML(state.settings.currency)}</span></div>
+            <button onclick="addToCart('${i.id}')" class="pos-item bg-white rounded-2xl shadow-card overflow-hidden text-start hover:shadow-pop">
+              ${safePhoto(i.photo) ? `<img src="${safePhoto(i.photo)}" class="w-full h-24 object-cover" alt="">` : ''}
+              <div class="p-4 ${safePhoto(i.photo) ? '!pt-2.5' : ''}">
+                <div class="font-semibold text-slate-900 leading-snug">${escapeHTML(i.nameEn)}</div>
+                ${i.nameAr ? `<div class="text-xs text-slate-500 mt-0.5" dir="rtl">${escapeHTML(i.nameAr)}</div>` : ''}
+                <div class="text-brand-700 font-bold mt-2">${fmtMoney(i.price)} <span class="text-xs font-medium">${escapeHTML(state.settings.currency)}</span></div>
+              </div>
             </button>`).join('') || '<div class="col-span-full text-sm text-slate-400 bg-white rounded-2xl shadow-card p-8 text-center">No items in this category for this branch.</div>'}
         </div>
       </div>
@@ -488,9 +527,110 @@ function renderPos() {
     </div>`;
 }
 
+/* -------------------- TILL / SHIFT -------------------- */
+function openShiftFor(branchId) {
+  return state.shifts.find(s => s.branchId === branchId && s.status === 'open') || null;
+}
+// Cash expected in the drawer right now: float + cash payments of this
+// shift's orders that are STILL completed (a same-shift return took the
+// cash back out, so it nets to zero by exclusion).
+function shiftExpectedCash(shift) {
+  const orderIds = new Set(state.orders.filter(o => o.shiftId === shift.id && o.status === 'completed').map(o => o.id));
+  let cash = 0;
+  for (const id of orderIds) {
+    const d = state.orderDetailCache[id];
+    if (d) { cash += d.payments.filter(p => p.method === 'cash').reduce((s,p) => s + p.amount, 0); }
+  }
+  return { cash, float: shift.openingFloat, hasAllDetails: [...orderIds].every(id => state.orderDetailCache[id]) };
+}
+async function loadShiftCashDetails(shift) {
+  // Pull payment rows for any of this shift's orders not yet cached.
+  const ids = state.orders.filter(o => o.shiftId === shift.id && o.status === 'completed' && !state.orderDetailCache[o.id]).map(o => o.id);
+  if (!ids.length) return;
+  const [itemsR, paysR] = await Promise.all([
+    sb.from('order_items').select('*').in('order_id', ids),
+    sb.from('order_payments').select('*').in('order_id', ids),
+  ]);
+  ids.forEach(id => {
+    state.orderDetailCache[id] = {
+      items: (itemsR.data || []).filter(r => r.order_id === id).map(mapOrderItemFromDb),
+      payments: (paysR.data || []).filter(r => r.order_id === id).map(mapPaymentFromDb),
+    };
+  });
+}
+function openTillModal() {
+  const branchId = posBranchId();
+  openModal('Open till — ' + branchName(branchId), `
+    <div class="space-y-3">
+      <div><label class="label">Opening float (${escapeHTML(state.settings.currency)})</label>
+        <input id="till-float" type="number" min="0" step="0.05" class="input !text-lg" placeholder="e.g. 200.00"></div>
+      <div class="bg-slate-50 rounded-xl p-3 text-xs text-slate-600">Count the cash you're putting in the drawer to start the day. The close-till reconciliation measures against this.</div>
+    </div>`, async () => {
+    const float = parseFloat($('#till-float').value);
+    if (isNaN(float) || float < 0) { toast('Enter the opening float (0 is allowed)', 'error'); return false; }
+    const me = currentStaff();
+    const { data, error } = await sb.from('shifts').insert({
+      branch_id: branchId, opening_float: +float.toFixed(2), opened_by: me?.id || null,
+    }).select().single();
+    if (error) {
+      toast(error.code === '23505' ? 'A till is already open for this branch — reload.' : humanizeError(error), 'error');
+      return false;
+    }
+    state.shifts.unshift(mapShiftFromDb(data));
+    render(); toast('Till open — have a good shift', 'success');
+    return true;
+  }, { saveLabel: 'Open till' });
+}
+async function openCloseTillModal() {
+  const branchId = posBranchId();
+  const shift = openShiftFor(branchId);
+  if (!shift) return;
+  await loadShiftCashDetails(shift);
+  const exp = shiftExpectedCash(shift);
+  const expected = exp.float + exp.cash;
+  const orders = state.orders.filter(o => o.shiftId === shift.id && o.status === 'completed');
+  openModal('Close till — ' + branchName(branchId), `
+    <div class="space-y-3">
+      <div class="bg-slate-50 rounded-xl p-4 text-sm space-y-1">
+        <div class="flex justify-between text-slate-600"><span>Opening float</span><span>${fmtMoney(exp.float)}</span></div>
+        <div class="flex justify-between text-slate-600"><span>Cash sales (${orders.length} orders this shift)</span><span>${fmtMoney(exp.cash)}</span></div>
+        <div class="flex justify-between font-bold text-slate-900 border-t border-slate-200 pt-1"><span>Expected in drawer</span><span>${fmtMoney(expected)}</span></div>
+      </div>
+      <div><label class="label">Counted cash (${escapeHTML(state.settings.currency)})</label>
+        <input id="till-counted" type="number" min="0" step="0.05" class="input !text-lg" oninput="updateOverShort(${expected.toFixed(2)})"></div>
+      <div id="till-overshort" class="text-sm font-semibold text-slate-600">Over/short: —</div>
+      <div><label class="label">Notes (optional)</label><input id="till-notes" class="input" placeholder="e.g. reason for shortage, handover to..."></div>
+    </div>`, async () => {
+    const counted = parseFloat($('#till-counted').value);
+    if (isNaN(counted) || counted < 0) { toast('Count the drawer and enter the amount', 'error'); return false; }
+    const me = currentStaff();
+    const { error } = await sb.from('shifts').update({
+      status: 'closed', closed_by: me?.id || null, closed_at: new Date().toISOString(),
+      expected_cash: +expected.toFixed(2), counted_cash: +counted.toFixed(2),
+      over_short: +(counted - expected).toFixed(2), notes: $('#till-notes').value.trim() || null,
+    }).eq('id', shift.id);
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    shift.status = 'closed'; shift.expectedCash = +expected.toFixed(2);
+    shift.countedCash = +counted.toFixed(2); shift.overShort = +(counted - expected).toFixed(2);
+    render();
+    const os = counted - expected;
+    toast(Math.abs(os) < 0.005 ? 'Till closed — drawer balanced ✓' : `Till closed — ${os > 0 ? 'over' : 'short'} ${fmtMoney(Math.abs(os))}`, Math.abs(os) < 0.005 ? 'success' : 'info');
+    return true;
+  }, { saveLabel: 'Close till' });
+}
+function updateOverShort(expected) {
+  const counted = parseFloat($('#till-counted')?.value);
+  const el = $('#till-overshort'); if (!el) return;
+  if (isNaN(counted)) { el.textContent = 'Over/short: —'; el.style.color = ''; return; }
+  const os = counted - expected;
+  el.textContent = 'Over/short: ' + (os > 0 ? '+' : '') + fmtMoney(os);
+  el.style.color = Math.abs(os) < 0.005 ? '#047857' : '#b91c1c';
+}
+
 /* -------------------- CHECKOUT -------------------- */
 function openCheckoutModal() {
   if (!posCart.length) return;
+  if (!openShiftFor(posBranchId())) { toast('Open the till first', 'error'); return; }
   const t = cartTotals();
   const body = `
     <div class="space-y-4">
@@ -570,10 +710,13 @@ async function saveOrder() {
   }
   const branchId = posBranchId();
   const me = currentStaff();
+  const shift = openShiftFor(branchId);
+  if (!shift) { toast('The till is closed — open it first', 'error'); return false; }
   const orderRow = { branch_id: branchId, business_date: todayISO(), status: 'completed',
     subtotal: +t.subtotal.toFixed(2), vat_amount: +t.vat.toFixed(2), total: +t.total.toFixed(2), cashier_id: me?.id || null,
     order_type: posOrderType, discount_amount: +t.discount.toFixed(2),
-    discount_reason: t.discount > 0 ? (posDiscount?.reason || null) : null };
+    discount_reason: t.discount > 0 ? (posDiscount?.reason || null) : null,
+    shift_id: shift.id };
 
   // Insert; the DB trigger assigns order_no. Concurrent cashiers on one
   // branch can collide on the unique (branch, date, no) — retry once.
@@ -758,12 +901,21 @@ function renderDashboard() {
   const byType = Object.entries(ORDER_TYPES)
     .map(([k, label]) => ({ label, n: todayOrders.filter(o => o.orderType === k).length }))
     .filter(x => x.n > 0);
-  const byBranch = state.branches.filter(b => b.active).map(b => ({
-    name: b.name,
-    today: sum(todayOrders.filter(o => o.branchId === b.id)),
-    week: sum(done.filter(o => o.branchId === b.id)),
-    n: todayOrders.filter(o => o.branchId === b.id).length,
-  }));
+  const byBranch = state.branches.filter(b => b.active).map(b => {
+    const open = state.shifts.find(s => s.branchId === b.id && s.status === 'open');
+    const lastClosed = state.shifts.find(s => s.branchId === b.id && s.status === 'closed');
+    return {
+      name: b.name,
+      today: sum(todayOrders.filter(o => o.branchId === b.id)),
+      week: sum(done.filter(o => o.branchId === b.id)),
+      n: todayOrders.filter(o => o.branchId === b.id).length,
+      till: open
+        ? `<span class="badge badge-green">Open</span> <span class="text-xs text-slate-500">since ${fmtDateTime(open.openedAt)}</span>`
+        : lastClosed
+          ? `<span class="badge badge-slate">Closed</span> <span class="text-xs ${Math.abs(lastClosed.overShort) < 0.005 ? 'text-emerald-700' : 'text-rose-600'}">${Math.abs(lastClosed.overShort) < 0.005 ? 'balanced ✓' : (lastClosed.overShort > 0 ? 'over +' : 'short −') + fmtMoney(Math.abs(lastClosed.overShort))}</span>`
+          : '<span class="badge badge-slate">Never opened</span>',
+    };
+  });
   const stat = (label, value, sub) => `
     <div class="bg-white rounded-2xl shadow-card p-4">
       <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">${label}</div>
@@ -787,9 +939,10 @@ function renderDashboard() {
       <div class="px-5 py-4 border-b border-slate-100"><h3 class="font-display text-lg font-semibold text-slate-900">By branch</h3></div>
       <table class="w-full text-sm">
         <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
-          <th class="text-start px-4 py-2.5">Branch</th><th class="text-end px-4 py-2.5">Today</th><th class="text-end px-4 py-2.5">Orders today</th><th class="text-end px-4 py-2.5">7 days</th></tr></thead>
+          <th class="text-start px-4 py-2.5">Branch</th><th class="text-start px-4 py-2.5">Till</th><th class="text-end px-4 py-2.5">Today</th><th class="text-end px-4 py-2.5">Orders today</th><th class="text-end px-4 py-2.5">7 days</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${byBranch.map(b => `<tr><td class="px-4 py-2.5 font-medium">${escapeHTML(b.name)}</td>
+            <td class="px-4 py-2.5">${b.till}</td>
             <td class="px-4 py-2.5 text-end font-semibold">${fmtMoney(b.today)}</td>
             <td class="px-4 py-2.5 text-end">${b.n}</td>
             <td class="px-4 py-2.5 text-end text-slate-600">${fmtMoney(b.week)}</td></tr>`).join('')}
@@ -819,7 +972,8 @@ function renderMenu() {
         <div class="divide-y divide-slate-100">
           ${items.map(i => `
             <div class="px-5 py-2.5 flex items-center gap-3 text-sm ${i.active ? '' : 'opacity-50'}">
-              <div class="flex-1"><span class="font-medium">${escapeHTML(i.nameEn)}</span>${i.nameAr ? ` <span class="text-slate-400" dir="rtl">${escapeHTML(i.nameAr)}</span>` : ''}${i.active ? '' : ' <span class="badge badge-slate">Off</span>'}</div>
+              ${safePhoto(i.photo) ? `<img src="${safePhoto(i.photo)}" class="w-9 h-9 rounded-lg object-cover" alt="">` : '<div class="w-9 h-9 rounded-lg bg-brand-50"></div>'}
+              <div class="flex-1"><span class="font-medium">${escapeHTML(i.nameEn)}</span>${i.nameAr ? ` <span class="text-slate-400" dir="rtl">${escapeHTML(i.nameAr)}</span>` : ''}${i.sku ? ` <span class="text-[10px] text-slate-400">${escapeHTML(i.sku)}</span>` : ''}${i.active ? '' : ' <span class="badge badge-slate">Off</span>'}</div>
               <div class="font-semibold">${fmtMoney(i.price)}</div>
               <button onclick="openItemModal('${i.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
             </div>`).join('') || '<div class="px-5 py-4 text-sm text-slate-400">No items yet.</div>'}
@@ -833,12 +987,14 @@ function openCategoryModal(id) {
     <div class="space-y-3">
       <div><label class="label">Name (English)</label><input id="cat-en" class="input" value="${escapeHTML(editing?.nameEn || '')}"></div>
       <div><label class="label">Name (Arabic)</label><input id="cat-ar" class="input" dir="rtl" value="${escapeHTML(editing?.nameAr || '')}"></div>
-      <div class="grid grid-cols-2 gap-3">
+      <div class="grid grid-cols-3 gap-3">
+        <div><label class="label">Reference</label><input id="cat-ref" class="input" value="${escapeHTML(editing?.reference || '')}" placeholder="optional code"></div>
         <div><label class="label">Sort order</label><input id="cat-sort" type="number" class="input" value="${editing?.sortOrder ?? (state.categories.length + 1) * 10}"></div>
         <div><label class="label">Active</label><select id="cat-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
       </div>
     </div>`, async () => {
     const row = { name_en: $('#cat-en').value.trim(), name_ar: $('#cat-ar').value.trim(),
+      reference: $('#cat-ref').value.trim() || null,
       sort_order: parseInt($('#cat-sort').value) || 0, active: $('#cat-active').value === '1' };
     if (!row.name_en) { toast('Name required', 'error'); return false; }
     const q = editing ? sb.from('menu_categories').update(row).eq('id', editing.id) : sb.from('menu_categories').insert(row);
@@ -847,11 +1003,45 @@ function openCategoryModal(id) {
     await loadAll(); render(); toast('Saved', 'success');
   });
 }
+// Pending item-photo upload — reset in closeModal() (shared-tablet hygiene).
+let _itemPhoto = undefined; // undefined = untouched, '' = removed, 'data:...' = new photo
+function handleItemPhotoFile(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  if (!['image/jpeg','image/png','image/webp'].includes(file.type)) { toast('JPG, PNG or WebP only', 'error'); input.value=''; return; }
+  const img = new Image();
+  const url = URL.createObjectURL(file);
+  img.onload = () => {
+    // Resize to max 400px and recompress — keeps the row tiny (~20-40KB)
+    // so bulk-loading the menu stays cheap (HR-app photo-OOM lesson).
+    const scale = Math.min(1, 400 / Math.max(img.width, img.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    _itemPhoto = canvas.toDataURL('image/jpeg', 0.72);
+    URL.revokeObjectURL(url);
+    const prev = $('#item-photo-preview');
+    if (prev) prev.innerHTML = `<img src="${_itemPhoto}" class="w-16 h-16 rounded-xl object-cover">`;
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); toast('Could not read that image', 'error'); };
+  img.src = url;
+}
+function removeItemPhoto() {
+  _itemPhoto = '';
+  const prev = $('#item-photo-preview');
+  if (prev) prev.innerHTML = '<span class="text-xs text-slate-400">No photo</span>';
+}
+function generateSku() {
+  const el = $('#item-sku'); if (!el) return;
+  el.value = 'SK-' + String(Math.floor(1000 + Math.random() * 9000));
+}
 function openItemModal(id) {
   const editing = id ? state.items.find(i => i.id === id) : null;
   const cats = state.categories.slice().sort((a,b) => a.sortOrder - b.sortOrder);
   if (!cats.length) { toast('Add a category first', 'error'); return; }
   const offSet = new Set(state.branchOff.filter(o => o.itemId === id).map(o => o.branchId));
+  _itemPhoto = undefined;
   openModal(editing ? 'Edit item' : 'New item', `
     <div class="space-y-3">
       <div class="grid grid-cols-2 gap-3">
@@ -864,8 +1054,18 @@ function openItemModal(id) {
         <div><label class="label">Sort</label><input id="item-sort" type="number" class="input" value="${editing?.sortOrder ?? 10}"></div>
       </div>
       <div class="grid grid-cols-2 gap-3">
-        <div><label class="label">SKU (optional)</label><input id="item-sku" class="input" value="${escapeHTML(editing?.sku || '')}"></div>
+        <div><label class="label">SKU (optional)</label>
+          <div class="flex gap-2"><input id="item-sku" class="input" value="${escapeHTML(editing?.sku || '')}"><button type="button" onclick="generateSku()" class="btn btn-ghost !px-3">Generate</button></div></div>
         <div><label class="label">Active</label><select id="item-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+      </div>
+      <div>
+        <label class="label">Photo (optional)</label>
+        <div class="flex items-center gap-3">
+          <div id="item-photo-preview">${safePhoto(editing?.photo) ? `<img src="${safePhoto(editing.photo)}" class="w-16 h-16 rounded-xl object-cover">` : '<span class="text-xs text-slate-400">No photo</span>'}</div>
+          <input type="file" accept="image/jpeg,image/png,image/webp" onchange="handleItemPhotoFile(this)" class="text-xs">
+          ${safePhoto(editing?.photo) ? '<button type="button" onclick="removeItemPhoto()" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Remove</button>' : ''}
+        </div>
+        <div class="text-[10px] text-slate-500 mt-1">Resized automatically — shows on the POS grid.</div>
       </div>
       <div>
         <label class="label">Available at</label>
@@ -879,6 +1079,7 @@ function openItemModal(id) {
       price: parseFloat($('#item-price').value), category_id: $('#item-cat').value,
       sku: $('#item-sku').value.trim() || null, sort_order: parseInt($('#item-sort').value) || 0,
       active: $('#item-active').value === '1' };
+    if (_itemPhoto !== undefined) row.photo = _itemPhoto || null; // untouched = keep existing
     if (!row.name_en || isNaN(row.price)) { toast('Name and price required', 'error'); return false; }
     let itemId = editing?.id;
     if (editing) {

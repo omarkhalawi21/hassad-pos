@@ -443,6 +443,68 @@ ALTER TABLE public.orders ADD CONSTRAINT orders_discount_check
   CHECK (discount_amount >= 0);
 
 -- =============================================================
+-- 6. SHIFTS (till open/close + cash reconciliation) + menu polish
+--    A shift is a branch's till session: opened with a cash float,
+--    closed by counting the drawer. expected_cash is stored AT CLOSE
+--    (float + cash payments of this shift's still-completed orders)
+--    so the record survives later data changes; over_short =
+--    counted - expected. One open shift per branch, enforced by a
+--    partial unique index. Orders stamp the open shift's id.
+--    Menu polish: category reference code, item photo (small resized
+--    data URL -- the app resizes before upload and validates MIME).
+-- =============================================================
+CREATE TABLE IF NOT EXISTS public.shifts (
+  id             uuid primary key default gen_random_uuid(),
+  branch_id      uuid not null references public.branches(id) on delete restrict,
+  business_date  date not null default current_date,
+  status         text not null default 'open' CHECK (status IN ('open','closed')),
+  opening_float  numeric(12,2) not null default 0 CHECK (opening_float >= 0),
+  opened_by      uuid references public.staff(id),
+  opened_at      timestamptz not null default now(),
+  closed_by      uuid references public.staff(id),
+  closed_at      timestamptz,
+  expected_cash  numeric(12,2),
+  counted_cash   numeric(12,2),
+  over_short     numeric(12,2),
+  notes          text
+);
+CREATE UNIQUE INDEX IF NOT EXISTS shifts_one_open_per_branch
+  ON public.shifts(branch_id) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS shifts_opened_idx ON public.shifts(opened_at DESC);
+
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS shift_id uuid references public.shifts(id);
+ALTER TABLE public.menu_categories ADD COLUMN IF NOT EXISTS reference text;
+ALTER TABLE public.menu_items ADD COLUMN IF NOT EXISTS photo text;
+
+ALTER TABLE public.shifts ENABLE ROW LEVEL SECURITY;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT schemaname, tablename, policyname FROM pg_policies
+           WHERE schemaname='public' AND tablename='shifts' LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', r.policyname, r.schemaname, r.tablename);
+  END LOOP;
+END $$;
+-- Same branch scoping as orders: admin/manager everywhere, cashiers
+-- their own branch. Cashiers open and close their own till (UPDATE
+-- is needed for the close); deletes are admin-only.
+CREATE POLICY "shifts_select_scoped"
+  ON public.shifts FOR SELECT TO authenticated
+  USING (public.has_role(ARRAY['admin','manager']) OR branch_id = public.my_branch_id());
+CREATE POLICY "shifts_insert_scoped"
+  ON public.shifts FOR INSERT TO authenticated
+  WITH CHECK (
+    public.has_role(ARRAY['admin','manager'])
+    OR (public.has_role(ARRAY['cashier']) AND branch_id = public.my_branch_id())
+  );
+CREATE POLICY "shifts_update_scoped"
+  ON public.shifts FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager']) OR branch_id = public.my_branch_id())
+  WITH CHECK (public.has_role(ARRAY['admin','manager']) OR branch_id = public.my_branch_id());
+CREATE POLICY "shifts_delete_admin"
+  ON public.shifts FOR DELETE TO authenticated USING (public.is_admin());
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
