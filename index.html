@@ -476,7 +476,6 @@ function addToCart(itemId) {
   const it = state.items.find(i => i.id === itemId); if (!it) return;
   const groups = itemModifierGroups(itemId);
   if (!groups.length) { pushCartLine(it, []); return; }
-  _pickerSel = {};
   const body = groups.map(g => `
     <div class="mb-4">
       <div class="text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
@@ -493,14 +492,18 @@ function addToCart(itemId) {
     </div>`).join('');
   openModal(it.nameEn + (it.nameAr ? ' — ' + it.nameAr : ''), body, async () => {
     for (const g of groups) {
-      if (g.required && !_pickerSel[g.id]) { toast(`Choose: ${g.nameEn}`, 'error'); return false; }
+      if (g.required && !_pickerSel?.[g.id]) { toast(`Choose: ${g.nameEn}`, 'error'); return false; }
     }
-    const mods = groups.map(g => _pickerSel[g.id]).filter(Boolean);
+    const mods = groups.map(g => _pickerSel?.[g.id]).filter(Boolean);
     pushCartLine(it, mods);
     return true;
   }, { saveLabel: 'Add to order' });
+  // AFTER openModal — its internal closeModal() wipes _pickerSel, so
+  // initializing it earlier leaves taps writing into null.
+  _pickerSel = {};
 }
 function pickOption(groupId, optionId) {
+  if (!_pickerSel) _pickerSel = {};
   const opt = state.modOptions.find(o => o.id === optionId);
   // Tap again to unpick (optional groups); picking replaces within the group.
   const prev = _pickerSel?.[groupId];
