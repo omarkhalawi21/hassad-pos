@@ -282,7 +282,7 @@ async function logout() {
   // Shared-tablet hygiene: reset every module-level transient var.
   posCart = []; posCategoryId = null; posOrderType = 'pickup'; posDiscount = null;
   posOrderNote = ''; posSearchQ = '';
-  reportState = { tab: 'sales', from: '', to: '', branch: 'all' };
+  reportState = { tab: 'sales', from: '', to: '', branch: 'all', category: 'all' };
   _checkoutSplit = null; _itemPhoto = undefined; authMode = 'login';
   location.hash = '';
   render();
@@ -1345,7 +1345,7 @@ async function printReceipt(orderId, mode = 'customer') {
 }
 
 /* -------------------- REPORTS -------------------- */
-let reportState = { tab: 'sales', from: '', to: '', branch: 'all' };
+let reportState = { tab: 'sales', from: '', to: '', branch: 'all', category: 'all' };
 const _reportInflight = new Set();
 
 function reportRangeKey() { return `${reportState.from}|${reportState.to}|${reportState.branch}`; }
@@ -1406,7 +1406,7 @@ function renderReports() {
   loadReportRange();
   const key = reportRangeKey();
   const data = state.reportCache[key];
-  const tabs = [['sales','Sales Summary'],['products','Products Mix'],['payments','Payments'],['tills','Tills']];
+  const tabs = [['sales','Sales Summary'],['products','Menu Engineering'],['payments','Payments'],['tills','Tills']];
   const rangeBar = `
     <div class="bg-white rounded-2xl shadow-card p-4 mb-4">
       <div class="flex gap-2 flex-wrap items-end">
@@ -1509,18 +1509,35 @@ function reportSalesSummary(data) {
 
 function reportProductsMix(data) {
   const doneIds = new Set(reportDone(data).map(o=>o.id));
-  const lines = data.items.filter(l => doneIds.has(l.orderId));
+  // Menu-engineering filter: narrow to one category. order_items store the
+  // item_id; map it to its current category (deleted items → no category,
+  // shown only under "All").
+  const itemCat = id => state.items.find(i => i.id === id)?.categoryId || null;
+  let lines = data.items.filter(l => doneIds.has(l.orderId));
+  if (reportState.category !== 'all') lines = lines.filter(l => itemCat(l.itemId) === reportState.category);
   const byItem = {};
   lines.forEach(l => { const k=l.nameEn; (byItem[k]=byItem[k]||{name:l.nameEn, nameAr:l.nameAr, qty:0, rev:0}); byItem[k].qty+=l.qty; byItem[k].rev+=l.lineTotal; });
   const items = Object.values(byItem).sort((a,b)=>b.rev-a.rev);
+  const totalQty = items.reduce((s,x)=>s+x.qty,0), totalRev = items.reduce((s,x)=>s+x.rev,0);
   const mods = {};
   lines.forEach(l => (l.modifiers||[]).forEach(m => { mods[m.nameEn]=(mods[m.nameEn]||0)+l.qty; }));
   const modList = Object.entries(mods).sort((a,b)=>b[1]-a[1]).slice(0,15);
+  const cats = state.categories.slice().sort((a,b)=>a.sortOrder-b.sortOrder);
   return `
-    <div class="flex justify-end mb-3"><button onclick="exportReportCSV('products')" class="btn btn-ghost btn-sm">⭳ CSV</button></div>
+    <div class="flex items-center gap-2 mb-3 flex-wrap">
+      <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Category</div>
+      <select class="input !py-1.5 !text-sm !w-auto" onchange="reportState.category=this.value; render();">
+        <option value="all" ${reportState.category==='all'?'selected':''}>All categories</option>
+        ${cats.map(c=>`<option value="${c.id}" ${reportState.category===c.id?'selected':''}>${escapeHTML(c.nameEn)}</option>`).join('')}
+      </select>
+      <button onclick="exportReportCSV('products')" class="btn btn-ghost btn-sm ms-auto">⭳ CSV</button>
+    </div>
     <div class="grid lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2 bg-white rounded-2xl shadow-card overflow-hidden">
-        <div class="px-5 py-3 border-b border-slate-100 font-display font-semibold text-slate-900">Products — ${items.length}</div>
+        <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+          <span class="font-display font-semibold text-slate-900">Products — ${items.length}</span>
+          <span class="text-sm text-slate-500">${totalQty} sold · ${fmtMoney(totalRev)} ${escapeHTML(state.settings.currency)}</span>
+        </div>
         <div class="overflow-x-auto"><table class="w-full text-sm">
           <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100"><th class="text-start px-5 py-2">Product</th><th class="text-end px-3 py-2">Qty</th><th class="text-end px-5 py-2">Revenue</th></tr></thead>
           <tbody class="divide-y divide-slate-100">
@@ -1592,7 +1609,10 @@ function exportReportCSV(tab) {
     Object.keys(byDay).sort().forEach(d=>rows.push([d, byDay[d].n, byDay[d].net.toFixed(2), byDay[d].vat.toFixed(2), byDay[d].disc.toFixed(2)]));
   } else if (tab === 'products') {
     rows = [['Product','Arabic','Qty','Revenue']];
-    const byItem={}; data.items.filter(l=>doneIds.has(l.orderId)).forEach(l=>{const x=byItem[l.nameEn]=byItem[l.nameEn]||{ar:l.nameAr,qty:0,rev:0}; x.qty+=l.qty; x.rev+=l.lineTotal;});
+    const itemCat = id => state.items.find(i=>i.id===id)?.categoryId || null;
+    let plines = data.items.filter(l=>doneIds.has(l.orderId));
+    if (reportState.category!=='all') plines = plines.filter(l=>itemCat(l.itemId)===reportState.category);
+    const byItem={}; plines.forEach(l=>{const x=byItem[l.nameEn]=byItem[l.nameEn]||{ar:l.nameAr,qty:0,rev:0}; x.qty+=l.qty; x.rev+=l.lineTotal;});
     Object.entries(byItem).sort((a,b)=>b[1].rev-a[1].rev).forEach(([n,x])=>rows.push([n,x.ar,x.qty,x.rev.toFixed(2)]));
   } else if (tab === 'payments') {
     rows = [['Method','Count','Amount']];
