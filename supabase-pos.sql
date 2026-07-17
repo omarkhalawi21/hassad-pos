@@ -768,6 +768,81 @@ DELETE FROM public.menu_categories c
 UPDATE public.menu_categories SET active = false WHERE name_en IN ('v60','HOT');
 
 -- =============================================================
+-- 12. DEVICES (printers per branch) + kitchen ticket routing
+--     Mirrors the Foodics Devices screen: each branch registers its
+--     printers (their real hardware: Cashier TM-m30II, Kitchen
+--     TM-T20III) with enabled order types and, for kitchen printers,
+--     a category filter -- COMPENSATION and EMPLOYEE COFFEE are OFF
+--     on their kitchen printer, so staff drinks never print a bar
+--     ticket. device_categories: NO rows = ALL categories enabled;
+--     rows = only those listed. The browser print pipeline reads
+--     this config to decide whether/what the bar job prints; direct
+--     ePOS printing to the Epson IPs comes with the on-site printer
+--     test.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS public.devices (
+  id            uuid primary key default gen_random_uuid(),
+  branch_id     uuid not null references public.branches(id) on delete cascade,
+  type          text not null default 'cashier_printer'
+    CHECK (type IN ('cashier_printer','kitchen_printer')),
+  name          text not null,
+  model         text,
+  ip            text,
+  copies        int not null default 1 CHECK (copies BETWEEN 1 AND 3),
+  order_types   text[] not null default ARRAY['pickup','dine_in','delivery','drive_thru'],
+  active        boolean not null default true,
+  created_at    timestamptz not null default now()
+);
+CREATE TABLE IF NOT EXISTS public.device_categories (
+  device_id    uuid not null references public.devices(id) on delete cascade,
+  category_id  uuid not null references public.menu_categories(id) on delete cascade,
+  PRIMARY KEY (device_id, category_id)
+);
+
+-- Seed their real hardware for every active branch (guarded by name+branch).
+INSERT INTO public.devices (branch_id, type, name, model, ip)
+SELECT b.id, v.type, v.name, v.model, v.ip
+FROM public.branches b,
+     (VALUES ('cashier_printer','Cashier','TM-m30II','192.168.0.239'),
+             ('kitchen_printer','Kitchen','TM-T20III','192.168.0.239')) AS v(type, name, model, ip)
+WHERE b.active
+  AND NOT EXISTS (SELECT 1 FROM public.devices d WHERE d.branch_id = b.id AND d.name = v.name);
+
+ALTER TABLE public.devices           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.device_categories ENABLE ROW LEVEL SECURITY;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT schemaname, tablename, policyname FROM pg_policies
+           WHERE schemaname='public' AND tablename IN ('devices','device_categories') LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', r.policyname, r.schemaname, r.tablename);
+  END LOOP;
+END $$;
+-- Cashiers read their branch's devices (the print pipeline needs the
+-- routing config); admin/manager write.
+CREATE POLICY "devices_select_scoped"
+  ON public.devices FOR SELECT TO authenticated
+  USING (public.has_role(ARRAY['admin','manager']) OR branch_id = public.my_branch_id());
+CREATE POLICY "devices_insert_roles"
+  ON public.devices FOR INSERT TO authenticated WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "devices_update_roles"
+  ON public.devices FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "devices_delete_roles"
+  ON public.devices FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "device_categories_select_scoped"
+  ON public.device_categories FOR SELECT TO authenticated
+  USING (EXISTS (SELECT 1 FROM public.devices d WHERE d.id = device_id
+                 AND (public.has_role(ARRAY['admin','manager']) OR d.branch_id = public.my_branch_id())));
+CREATE POLICY "device_categories_insert_roles"
+  ON public.device_categories FOR INSERT TO authenticated WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "device_categories_update_roles"
+  ON public.device_categories FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "device_categories_delete_roles"
+  ON public.device_categories FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
