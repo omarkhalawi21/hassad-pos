@@ -1123,24 +1123,22 @@ async function printReceipt(orderId, mode = 'customer') {
     ${s.receiptFooterEn ? `<div class="c">${escapeHTML(s.receiptFooterEn)}</div>` : ''}
     ${s.receiptFooterAr ? `<div class="c ar">${escapeHTML(s.receiptFooterAr)}</div>` : ''}`;
 
-  // Bar/kitchen ticket: what the barista needs and nothing else — big
-  // order number, type, items with modifiers loud, note highlighted.
-  // No prices, no VAT, no QR.
+  // Bar/kitchen ticket: a SHORT stub — one header line, items with the
+  // Arabic inline and all modifiers bundled on one compact line each.
+  // No prices, no VAT, no QR, no footer; paper stays short.
   const barBody = `
-    <div class="c b" style="font-size:26px; margin-top:2mm">#${order.orderNo}</div>
-    <div class="c b" style="font-size:13px">${ORDER_TYPES[order.orderType] || 'Pickup'}</div>
-    <div class="c" style="font-size:10px">${fmtDateTime(order.createdAt)} · ${escapeHTML(branchName(order.branchId))} · ${escapeHTML(staffName(order.cashierId))}</div>
-    ${order.status !== 'completed' ? `<div class="c b" style="font-size:14px">*** ${order.status.toUpperCase()} ***</div>` : ''}
-    ${order.note ? `<div class="b" style="border:1.5px solid #000; padding:2mm; margin:2mm 0; font-size:12px">📝 ${escapeHTML(order.note)}</div>` : ''}
-    <hr>
+    <div class="row b" style="font-size:16px; align-items:baseline">
+      <span>#${order.orderNo} · ${ORDER_TYPES[order.orderType] || 'Pickup'}</span>
+      <span style="font-size:10px; font-weight:400">${fmtDateTime(order.createdAt)}</span>
+    </div>
+    ${order.status !== 'completed' ? `<div class="c b" style="font-size:12px">*** ${order.status.toUpperCase()} ***</div>` : ''}
+    ${order.note ? `<div class="b" style="border:1.5px solid #000; padding:1.5mm; margin:1.5mm 0; font-size:11px">📝 ${escapeHTML(order.note)}</div>` : ''}
+    <hr style="margin:3px 0">
     ${detail.items.map(l => `
-      <div style="margin:2.5mm 0">
-        <div class="b" style="font-size:14px">${l.qty} × ${escapeHTML(l.nameEn)}</div>
-        ${l.nameAr ? `<div class="ar b" style="font-size:12px">${escapeHTML(l.nameAr)}</div>` : ''}
-        ${(l.modifiers || []).map(m => `<div class="b" style="font-size:12px; padding-inline-start:6mm">▸ ${escapeHTML(m.nameEn)}${m.nameAr ? ` <span class="ar">${escapeHTML(m.nameAr)}</span>` : ''}</div>`).join('')}
-      </div>`).join('')}
-    <hr>
-    <div class="c" style="font-size:9px">BAR TICKET — not a tax invoice</div>`;
+      <div style="margin:1.5mm 0">
+        <div class="b" style="font-size:12.5px">${l.qty} × ${escapeHTML(l.nameEn)}${l.nameAr ? ` <span class="ar">${escapeHTML(l.nameAr)}</span>` : ''}</div>
+        ${(l.modifiers || []).length ? `<div class="b" style="font-size:11px; padding-inline-start:5mm">${(l.modifiers || []).map(m => `▸ ${escapeHTML(m.nameEn)}`).join('  ')}</div>` : ''}
+      </div>`).join('')}`;
 
   // Two SEPARATE print jobs, in order (Foodics rhythm: the customer copy
   // prints first and is handed over, the bar ticket follows). One popup;
