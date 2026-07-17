@@ -158,7 +158,7 @@ function mapOrderFromDb(r) {
     total: Number(r.total) || 0, cashierId: r.cashier_id, voidReason: r.void_reason || '', createdAt: r.created_at,
     orderType: r.order_type || 'pickup', discountAmount: Number(r.discount_amount) || 0,
     discountReason: r.discount_reason || '', returnedAt: r.returned_at, returnedBy: r.returned_by,
-    shiftId: r.shift_id || null, note: r.note || '' };
+    shiftId: r.shift_id || null, note: r.note || '', terminal: r.terminal || '' };
 }
 const ORDER_TYPES = { pickup: 'Pickup', dine_in: 'Dine-in', delivery: 'Delivery', drive_thru: 'Drive-thru' };
 function mapOrderItemFromDb(r) {
@@ -285,7 +285,7 @@ async function logout() {
 }
 
 /* -------------------- ROUTING / SHELL -------------------- */
-const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'branches', 'staff', 'devices', 'settings'];
+const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'branches', 'staff', 'devices', 'display', 'settings'];
 let authMode = 'login';
 function getRoute() {
   const h = (location.hash || '').replace(/^#\/?/, '').split('/')[0];
@@ -324,6 +324,12 @@ function renderMain() {
   if (!state.session) { app.innerHTML = renderLogin(); return; }
   const me = currentStaff();
   if (!me || !me.active) { app.innerHTML = renderNoAccessGate(); return; }
+  // Customer display: full-screen kiosk page, no shell/nav.
+  if (getRoute() === 'display') {
+    app.innerHTML = renderCustomerDisplay();
+    initDisplaySubscription();
+    return;
+  }
   const route = getRoute();
   let content = '';
   switch (route) {
@@ -624,6 +630,7 @@ function renderPos() {
       : i.categoryId === posCategoryId)
     .sort((a,b) => a.sortOrder - b.sortOrder);
   const t = cartTotals();
+  broadcastCart(); // mirror the cart to this branch's customer display
   return `
     <div class="bg-white rounded-xl shadow-card px-4 py-2 mb-4 flex items-center gap-3 flex-wrap text-sm">
       <span class="badge badge-green">Till open</span>
@@ -691,6 +698,121 @@ function renderPos() {
           <button onclick="openCheckoutModal()" class="btn btn-primary flex-1 !py-3 !text-base">Charge ${fmtMoney(t.total)}</button>
         </div>`}
       </div>
+    </div>`;
+}
+
+/* -------------------- CUSTOMER DISPLAY (Realtime broadcast) -------------------- */
+// The till broadcasts its cart to `display-<branchId>`; the /display page
+// (a second screen at the counter) subscribes and mirrors it live. No DB
+// rows involved — pure Supabase Realtime broadcast.
+let _dispCh = null, _dispChBranch = null, _dispLastPayload = '';
+function displayChannel(branchId) {
+  if (_dispCh && _dispChBranch === branchId) return _dispCh;
+  if (_dispCh) sb.removeChannel(_dispCh);
+  _dispChBranch = branchId;
+  _dispCh = sb.channel('display-' + branchId);
+  _dispCh.subscribe();
+  return _dispCh;
+}
+function broadcastCart() {
+  const branchId = posBranchId();
+  if (!branchId || !openShiftFor(branchId)) return;
+  const t = cartTotals();
+  const payload = {
+    lines: posCart.map(l => ({ qty: l.qty, nameEn: l.nameEn, nameAr: l.nameAr,
+      mods: (l.modifiers || []).map(m => ({ nameEn: m.nameEn, nameAr: m.nameAr })),
+      lineTotal: +(l.unitPrice * l.qty).toFixed(2) })),
+    gross: +t.gross.toFixed(2), discount: +t.discount.toFixed(2),
+    vat: +t.vat.toFixed(2), total: +t.total.toFixed(2),
+    orderType: posOrderType, ts: Date.now(),
+  };
+  const key = JSON.stringify({ ...payload, ts: 0 });
+  if (key === _dispLastPayload) return; // only send real changes
+  _dispLastPayload = key;
+  displayChannel(branchId).send({ type: 'broadcast', event: 'cart', payload });
+}
+function broadcastPaid(order) {
+  const ch = displayChannel(order.branchId);
+  ch.send({ type: 'broadcast', event: 'paid', payload: { orderNo: order.orderNo, total: order.total, ts: Date.now() } });
+  _dispLastPayload = '';
+}
+
+// ---- The /display page's own client state ----
+let _displayMode = 'idle';   // 'idle' | 'cart' | 'paid'
+let _displayCart = null, _displayPaid = null, _displaySubscribed = false, _displayPaidTimer = null;
+function initDisplaySubscription() {
+  if (_displaySubscribed) return;
+  const branchId = myBranchId() || state.branches.find(b => b.active)?.id;
+  if (!branchId) return;
+  _displaySubscribed = true;
+  sb.channel('display-' + branchId)
+    .on('broadcast', { event: 'cart' }, ({ payload }) => {
+      _displayCart = payload;
+      _displayMode = payload.lines?.length ? 'cart' : 'idle';
+      if (_displayMode === 'cart') { clearTimeout(_displayPaidTimer); }
+      if (getRoute() === 'display') render();
+    })
+    .on('broadcast', { event: 'paid' }, ({ payload }) => {
+      _displayPaid = payload;
+      _displayMode = 'paid';
+      if (getRoute() === 'display') render();
+      clearTimeout(_displayPaidTimer);
+      _displayPaidTimer = setTimeout(() => {
+        _displayMode = 'idle'; _displayCart = null;
+        if (getRoute() === 'display') render();
+      }, 7000);
+    })
+    .subscribe();
+}
+function renderCustomerDisplay() {
+  const s = state.settings;
+  const brand = `
+    <div class="text-center">
+      <div class="font-display text-5xl font-bold text-brand-800">${escapeHTML(s.companyName)}</div>
+      ${s.companyNameAr ? `<div class="font-display text-3xl text-brand-600 mt-2" dir="rtl">${escapeHTML(s.companyNameAr)}</div>` : ''}
+    </div>`;
+  let body = '';
+  if (_displayMode === 'paid' && _displayPaid) {
+    body = `
+      <div class="text-center">
+        <div class="text-7xl mb-6">✓</div>
+        <div class="font-display text-4xl font-bold text-slate-900">Thank you · شكراً</div>
+        <div class="font-display text-6xl font-bold text-brand-700 mt-6">${fmtMoney(_displayPaid.total)} <span class="text-2xl">${escapeHTML(s.currency)}</span></div>
+        <div class="text-2xl text-slate-500 mt-4">Order #${_displayPaid.orderNo}</div>
+      </div>`;
+  } else if (_displayMode === 'cart' && _displayCart?.lines?.length) {
+    const d = _displayCart;
+    body = `
+      <div class="w-full max-w-3xl">
+        <div class="space-y-3 mb-6" style="max-height:55vh; overflow:hidden">
+          ${d.lines.map(l => `
+            <div class="flex justify-between items-start gap-4 text-2xl">
+              <div>
+                <span class="font-semibold">${l.qty} × ${escapeHTML(l.nameEn)}</span>
+                ${l.nameAr ? ` <span dir="rtl" class="text-slate-500">${escapeHTML(l.nameAr)}</span>` : ''}
+                ${(l.mods || []).length ? `<div class="text-lg text-brand-700 ps-6">${l.mods.map(m => '+ ' + escapeHTML(m.nameEn)).join('  ')}</div>` : ''}
+              </div>
+              <span class="font-semibold tabular-nums">${fmtMoney(l.lineTotal)}</span>
+            </div>`).join('')}
+        </div>
+        <div class="border-t-2 border-slate-200 pt-4 space-y-1.5 text-xl text-slate-500">
+          ${d.discount > 0 ? `<div class="flex justify-between"><span>Items</span><span class="tabular-nums">${fmtMoney(d.gross)}</span></div>
+          <div class="flex justify-between text-emerald-700"><span>Discount · خصم</span><span class="tabular-nums">−${fmtMoney(d.discount)}</span></div>` : ''}
+          <div class="flex justify-between"><span>VAT ${state.settings.vatRate}% · الضريبة</span><span class="tabular-nums">${fmtMoney(d.vat)}</span></div>
+        </div>
+        <div class="flex justify-between items-baseline mt-3">
+          <span class="font-display text-3xl font-bold text-slate-900">Total · الإجمالي</span>
+          <span class="font-display text-6xl font-bold text-brand-700 tabular-nums">${fmtMoney(d.total)} <span class="text-2xl">${escapeHTML(s.currency)}</span></span>
+        </div>
+      </div>`;
+  } else {
+    body = `${brand}<div class="text-2xl text-slate-400 mt-8 text-center">Welcome · أهلاً وسهلاً</div>`;
+  }
+  return `
+    <div class="min-h-screen flex flex-col items-center justify-center p-10" style="background:#fbf7f1">
+      ${_displayMode === 'cart' ? `<div class="font-display text-2xl font-bold text-brand-800 mb-8">${escapeHTML(s.companyName)}</div>` : ''}
+      ${body}
+      <button onclick="document.documentElement.requestFullscreen?.()" class="fixed bottom-3 right-3 btn btn-ghost !text-xs opacity-40 hover:opacity-100">⛶ Full screen</button>
     </div>`;
 }
 
@@ -966,7 +1088,8 @@ async function saveOrder() {
     subtotal: +t.subtotal.toFixed(2), vat_amount: +t.vat.toFixed(2), total: +t.total.toFixed(2), cashier_id: me?.id || null,
     order_type: posOrderType, discount_amount: +t.discount.toFixed(2),
     discount_reason: t.discount > 0 ? (posDiscount?.reason || null) : null,
-    shift_id: shift.id, note: posOrderNote || null };
+    shift_id: shift.id, note: posOrderNote || null,
+    terminal: localStorage.getItem('posTerminal') || null };
 
   // Insert; the DB trigger assigns order_no. Concurrent cashiers on one
   // branch can collide on the unique (branch, date, no) — retry once.
@@ -995,7 +1118,8 @@ async function saveOrder() {
   posCart = []; posDiscount = null; posOrderType = 'pickup'; posOrderNote = '';
   render();
   toast(`Order #${mapped.orderNo} completed`, 'success');
-  printReceipt(mapped.id, 'both'); // customer receipt + bar ticket in one job
+  broadcastPaid(mapped); // thank-you screen on the customer display
+  printReceipt(mapped.id, 'both'); // customer receipt + bar ticket, in order
   return true;
 }
 
@@ -1639,6 +1763,15 @@ function renderDevices() {
         <h2 class="font-display text-2xl font-semibold text-slate-900">Devices</h2>
       </div>
       ${canEdit ? `<button onclick="openDeviceModal(null)" class="btn btn-primary">+ Device</button>` : ''}
+    </div>
+    <div class="bg-white rounded-2xl shadow-card p-4 mb-4 flex items-center gap-3 flex-wrap">
+      <div class="flex-1 min-w-40">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">This device</div>
+        <div class="text-xs text-slate-500 mt-0.5">Name this till (stamped on every order it rings) — e.g. "Cashier 1".</div>
+      </div>
+      <input id="terminal-name" class="input !w-44" placeholder="e.g. Cashier 1" value="${escapeHTML(localStorage.getItem('posTerminal') || '')}">
+      <button onclick="localStorage.setItem('posTerminal', $('#terminal-name').value.trim()); toast('This device is now: ' + ($('#terminal-name').value.trim() || 'unnamed'), 'success');" class="btn btn-ghost">Save</button>
+      <a href="#/display" class="btn btn-primary">Open customer display</a>
     </div>
     ${visibleBranches.map(b => {
       const devs = state.devices.filter(d => d.branchId === b.id);

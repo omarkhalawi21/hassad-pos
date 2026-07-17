@@ -843,6 +843,15 @@ CREATE POLICY "device_categories_delete_roles"
   ON public.device_categories FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
 
 -- =============================================================
+-- 13. TERMINAL NAME ON ORDERS
+--     Each till device registers a name once (kept on the device);
+--     orders stamp it so multi-till branches can trace which counter
+--     rang what. The customer display itself needs no schema — it
+--     mirrors the till over Supabase Realtime broadcast (no rows).
+-- =============================================================
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS terminal text;
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
