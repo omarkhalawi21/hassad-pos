@@ -18,6 +18,7 @@
   .btn-ghost { background:#fff; color:#334155; border-color:#e2e8f0; } .btn-ghost:hover { background:#f8fafc; }
   .btn-danger { background:#fff; color:#a93838; border-color:#f1d4d4; } .btn-danger:hover { background:#fdf2f2; }
   .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-sm { padding:.35rem .7rem; font-size:.78rem; border-radius:.6rem; }
   .input { width:100%; padding:.55rem .8rem; border:1px solid #e2e8f0; border-radius:.7rem; font-size:.9rem; background:#fff; }
   .input:focus { outline:2px solid #c9945566; border-color:#c99455; }
   .label { display:block; font-size:.72rem; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:#64748b; margin-bottom:.3rem; }
@@ -87,6 +88,7 @@ function humanizeError(err) {
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 function fmtMoney(n) { return Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtDateTime(ts) { return ts ? new Date(ts).toLocaleString(undefined, { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '—'; }
+function fmtDate(d) { if (!d) return '—'; const x = new Date(d.length === 10 ? d + 'T12:00:00' : d); return x.toLocaleDateString(undefined, { day:'2-digit', month:'short', year:'numeric' }); }
 // VAT-inclusive price → contained VAT portion.
 function vatPortion(totalInc, rate) { return totalInc * rate / (100 + rate); }
 
@@ -100,6 +102,7 @@ function emptyState() {
     modGroups: [], modOptions: [], itemModGroups: [],  // [{itemId, groupId, minSelect, maxSelect}]
     menuGroups: [], itemMenuGroups: [],                // channel menus (Koinz Menu, Taker)
     devices: [], deviceCategories: [],                 // printers per branch + kitchen category filter
+    reportCache: {},                                   // key "from|to|branch" → { orders, items, payments, shifts, movements }
     orders: [],           // capped recent window (today + last 7 days)
     shifts: [],           // open shifts + last 7 days of closed ones
     shiftMovements: [],   // drawer movements for the loaded shifts window
@@ -279,13 +282,14 @@ async function logout() {
   // Shared-tablet hygiene: reset every module-level transient var.
   posCart = []; posCategoryId = null; posOrderType = 'pickup'; posDiscount = null;
   posOrderNote = ''; posSearchQ = '';
+  reportState = { tab: 'sales', from: '', to: '', branch: 'all' };
   _checkoutSplit = null; _itemPhoto = undefined; authMode = 'login';
   location.hash = '';
   render();
 }
 
 /* -------------------- ROUTING / SHELL -------------------- */
-const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'branches', 'staff', 'devices', 'display', 'settings'];
+const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'reports', 'branches', 'staff', 'devices', 'display', 'settings'];
 let authMode = 'login';
 function getRoute() {
   const h = (location.hash || '').replace(/^#\/?/, '').split('/')[0];
@@ -301,6 +305,7 @@ function navItems() {
     { key:'dashboard', label:'Dashboard', show: hasRole('admin','manager') },
     { key:'pos',       label:'POS',       show: true },
     { key:'orders',    label:'Orders',    show: true },
+    { key:'reports',   label:'Reports',   show: hasRole('admin','manager') },
     { key:'menu',      label:'Menu',      show: hasRole('admin','manager') },
     { key:'branches',  label:'Branches',  show: isAdmin() },
     { key:'staff',     label:'Staff',     show: isAdmin() },
@@ -338,6 +343,7 @@ function renderMain() {
     case 'dashboard': content = hasRole('admin','manager') ? renderDashboard() : renderPos(); break;
     case 'menu':      content = hasRole('admin','manager') ? renderMenu() : renderPos(); break;
     case 'item':      content = hasRole('admin','manager') ? renderItemProfile(getRouteArg()) : renderPos(); break;
+    case 'reports':   content = hasRole('admin','manager') ? renderReports() : renderPos(); break;
     case 'branches':  content = isAdmin() ? renderBranches() : renderPos(); break;
     case 'devices':   content = renderDevices(); break; // POS-side page: cashiers view their branch, managers edit
     case 'staff':     content = isAdmin() ? renderStaff() : renderPos(); break;
@@ -1336,6 +1342,277 @@ async function printReceipt(orderId, mode = 'customer') {
     <\/script>
   </body></html>`;
   openPrintWindow(html);
+}
+
+/* -------------------- REPORTS -------------------- */
+let reportState = { tab: 'sales', from: '', to: '', branch: 'all' };
+const _reportInflight = new Set();
+
+function reportRangeKey() { return `${reportState.from}|${reportState.to}|${reportState.branch}`; }
+function setReportRange(preset) {
+  const d = new Date(); const fmt = x => x.toISOString().slice(0, 10);
+  const today = fmt(d);
+  if (preset === 'today') { reportState.from = today; reportState.to = today; }
+  else if (preset === 'yesterday') { const y = new Date(d); y.setDate(y.getDate() - 1); reportState.from = fmt(y); reportState.to = fmt(y); }
+  else if (preset === 'week') { const w = new Date(d); w.setDate(w.getDate() - 6); reportState.from = fmt(w); reportState.to = today; }
+  else if (preset === 'month') { const m = new Date(d); m.setDate(m.getDate() - 29); reportState.from = fmt(m); reportState.to = today; }
+  else if (preset === 'thisMonth') { reportState.from = today.slice(0, 8) + '01'; reportState.to = today; }
+  loadReportRange(); render();
+}
+// On-demand range load (orders + their lines/payments + shifts/movements)
+// — orders bulk-load is only a 7-day window, so reports fetch their own
+// range and cache it per from|to|branch, guarded against double-fetch.
+async function loadReportRange() {
+  if (!reportState.from || !reportState.to) return;
+  const key = reportRangeKey();
+  if (state.reportCache[key] || _reportInflight.has(key)) return;
+  _reportInflight.add(key);
+  try {
+    let oq = sb.from('orders').select('*').gte('business_date', reportState.from).lte('business_date', reportState.to);
+    let sq = sb.from('shifts').select('*').gte('business_date', reportState.from).lte('business_date', reportState.to);
+    if (reportState.branch !== 'all') { oq = oq.eq('branch_id', reportState.branch); sq = sq.eq('branch_id', reportState.branch); }
+    const [ordersR, shiftsR] = await Promise.all([oq.order('created_at', { ascending: false }).limit(5000), sq]);
+    const orders = (ordersR.data || []).map(mapOrderFromDb);
+    const orderIds = orders.map(o => o.id);
+    const shiftIds = (shiftsR.data || []).map(s => s.id);
+    // Lines + payments for these orders; movements for these shifts. Chunk
+    // the IN() lists so a big range doesn't build a monster URL.
+    const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+    const items = [], payments = [], movements = [];
+    for (const ids of chunk(orderIds, 200)) {
+      const [li, pa] = await Promise.all([
+        sb.from('order_items').select('*').in('order_id', ids),
+        sb.from('order_payments').select('*').in('order_id', ids),
+      ]);
+      items.push(...(li.data || []).map(mapOrderItemFromDb));
+      payments.push(...(pa.data || []).map(mapPaymentFromDb));
+    }
+    for (const ids of chunk(shiftIds, 200)) {
+      const mv = await sb.from('shift_movements').select('*').in('shift_id', ids);
+      movements.push(...(mv.data || []).map(mapShiftMovementFromDb));
+    }
+    state.reportCache[key] = { orders, items, payments, shifts: (shiftsR.data || []).map(mapShiftFromDb), movements };
+  } catch (e) {
+    console.error('Report load failed:', e);
+    state.reportCache[key] = { orders: [], items: [], payments: [], shifts: [], movements: [], error: true };
+  } finally {
+    _reportInflight.delete(key);
+    if (getRoute() === 'reports') render();
+  }
+}
+
+function renderReports() {
+  if (!reportState.from) { const t = todayISO(); reportState.from = t.slice(0,8)+'01'; reportState.to = t; }
+  loadReportRange();
+  const key = reportRangeKey();
+  const data = state.reportCache[key];
+  const tabs = [['sales','Sales Summary'],['products','Products Mix'],['payments','Payments'],['tills','Tills']];
+  const rangeBar = `
+    <div class="bg-white rounded-2xl shadow-card p-4 mb-4">
+      <div class="flex gap-2 flex-wrap items-end">
+        <div><div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">From</div>
+          <input type="date" class="input !py-2 !text-sm" value="${escapeHTML(reportState.from)}" onchange="reportState.from=this.value; loadReportRange(); render();"></div>
+        <div><div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">To</div>
+          <input type="date" class="input !py-2 !text-sm" value="${escapeHTML(reportState.to)}" onchange="reportState.to=this.value; loadReportRange(); render();"></div>
+        <div><div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">Branch</div>
+          <select class="input !py-2 !text-sm" onchange="reportState.branch=this.value; loadReportRange(); render();">
+            <option value="all" ${reportState.branch==='all'?'selected':''}>All branches</option>
+            ${state.branches.filter(b=>b.active).map(b=>`<option value="${b.id}" ${reportState.branch===b.id?'selected':''}>${escapeHTML(b.name)}</option>`).join('')}
+          </select></div>
+        <div class="flex gap-1 flex-wrap ms-auto">
+          ${[['today','Today'],['yesterday','Yesterday'],['week','7d'],['month','30d'],['thisMonth','This month']].map(([k,l])=>`
+            <button onclick="setReportRange('${k}')" class="text-xs px-2.5 py-1.5 rounded-full bg-slate-50 border border-slate-200 hover:bg-brand-50 hover:text-brand-700">${l}</button>`).join('')}
+        </div>
+      </div>
+    </div>`;
+  const tabBar = `<div class="flex gap-1 border-b border-slate-200 mb-5 overflow-x-auto">
+    ${tabs.map(([k,l])=>`<button onclick="reportState.tab='${k}'; render();" class="tab whitespace-nowrap ${reportState.tab===k?'active':''}">${l}</button>`).join('')}</div>`;
+
+  let body;
+  if (!data) body = `<div class="bg-white rounded-2xl shadow-card p-12 text-center"><div class="w-10 h-10 rounded-full border-4 border-brand-200 border-t-brand-700 animate-spin mx-auto"></div><div class="text-sm text-slate-500 mt-3">Loading ${escapeHTML(reportState.from)} → ${escapeHTML(reportState.to)}…</div></div>`;
+  else if (data.error) body = `<div class="bg-white rounded-2xl shadow-card p-10 text-center text-rose-600 text-sm">Could not load this range — try a shorter one.</div>`;
+  else body = reportState.tab==='products' ? reportProductsMix(data)
+    : reportState.tab==='payments' ? reportPayments(data)
+    : reportState.tab==='tills' ? reportTills(data)
+    : reportSalesSummary(data);
+
+  return `
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <h2 class="font-display text-2xl font-semibold text-slate-900">Reports</h2>
+      <span class="text-sm text-slate-400">${escapeHTML(fmtDate(reportState.from))} → ${escapeHTML(fmtDate(reportState.to))}</span>
+    </div>
+    ${rangeBar}${tabBar}${body}`;
+}
+
+// Completed orders only, for money math (returns/voids excluded).
+function reportDone(data) { return data.orders.filter(o => o.status === 'completed'); }
+
+function reportSalesSummary(data) {
+  const done = reportDone(data);
+  const returned = data.orders.filter(o => o.status === 'returned');
+  const sum = list => list.reduce((s,o)=>s+o.total,0);
+  const net = sum(done), vat = done.reduce((s,o)=>s+o.vatAmount,0), disc = done.reduce((s,o)=>s+o.discountAmount,0);
+  const avg = done.length ? net/done.length : 0;
+  const stat = (label, val, sub) => `<div class="bg-white rounded-2xl shadow-card p-4"><div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">${label}</div><div class="font-display text-2xl font-semibold text-slate-900 mt-1">${val}</div>${sub?`<div class="text-xs text-slate-500 mt-1">${sub}</div>`:''}</div>`;
+  // Per-day totals
+  const byDay = {}; done.forEach(o => { byDay[o.businessDate] = (byDay[o.businessDate]||0) + o.total; });
+  const days = Object.keys(byDay).sort();
+  const dayMax = Math.max(1, ...Object.values(byDay));
+  // Per-hour totals (local hour of created_at)
+  const byHour = Array(24).fill(0);
+  done.forEach(o => { byHour[new Date(o.createdAt).getHours()] += o.total; });
+  const hourMax = Math.max(1, ...byHour);
+  // By branch + order type
+  const byBranch = state.branches.filter(b=>b.active).map(b=>({name:b.name, total:sum(done.filter(o=>o.branchId===b.id)), n:done.filter(o=>o.branchId===b.id).length})).filter(x=>x.n);
+  const byType = Object.entries(ORDER_TYPES).map(([k,l])=>({label:l, total:sum(done.filter(o=>o.orderType===k)), n:done.filter(o=>o.orderType===k).length})).filter(x=>x.n);
+  return `
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
+      ${stat('Net sales', fmtMoney(net)+' '+escapeHTML(state.settings.currency), done.length+' orders')}
+      ${stat('Average ticket', fmtMoney(avg), '')}
+      ${stat('VAT collected', fmtMoney(vat), '')}
+      ${stat('Discounts', fmtMoney(disc), '')}
+      ${stat('Returns', fmtMoney(sum(returned)), returned.length+' order'+(returned.length===1?'':'s'))}
+      ${stat('Busiest day', days.length?fmtMoney(dayMax):'—', days.length?fmtDate(Object.entries(byDay).sort((a,b)=>b[1]-a[1])[0][0]):'')}
+    </div>
+    <div class="flex justify-end mb-3"><button onclick="exportReportCSV('sales')" class="btn btn-ghost btn-sm">${'⭳'} CSV</button></div>
+    ${days.length>1 ? `<div class="bg-white rounded-2xl shadow-card p-5 mb-4">
+      <h3 class="font-display font-semibold text-slate-900 mb-4">Sales by day</h3>
+      <div class="flex items-end gap-1.5 h-40">
+        ${days.map(d=>`<div class="flex-1 flex flex-col items-center justify-end gap-1" title="${escapeHTML(fmtDate(d))}: ${fmtMoney(byDay[d])}">
+          <div class="w-full bg-brand-500 rounded-t" style="height:${Math.round(byDay[d]/dayMax*100)}%; min-height:2px"></div>
+          <div class="text-[8px] text-slate-400 whitespace-nowrap mt-1">${new Date(d).getDate()}/${new Date(d).getMonth()+1}</div>
+        </div>`).join('')}
+      </div></div>` : ''}
+    <div class="bg-white rounded-2xl shadow-card p-5 mb-4">
+      <h3 class="font-display font-semibold text-slate-900 mb-4">Sales by hour</h3>
+      <div class="flex items-end gap-1 h-40">
+        ${byHour.map((v,h)=>`<div class="flex-1 flex flex-col items-center justify-end gap-1" title="${h}:00 — ${fmtMoney(v)}">
+          <div class="w-full ${v>0?'bg-brand-500':'bg-slate-100'} rounded-t" style="height:${Math.round(v/hourMax*100)}%; min-height:1px"></div>
+          <div class="text-[8px] text-slate-400">${h}</div>
+        </div>`).join('')}
+      </div></div>
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="bg-white rounded-2xl shadow-card overflow-hidden">
+        <div class="px-5 py-3 border-b border-slate-100 font-display font-semibold text-slate-900">By branch</div>
+        <table class="w-full text-sm"><tbody class="divide-y divide-slate-100">
+          ${byBranch.sort((a,b)=>b.total-a.total).map(x=>`<tr><td class="px-5 py-2.5 font-medium">${escapeHTML(x.name)}</td><td class="px-3 py-2.5 text-end text-slate-500">${x.n}</td><td class="px-5 py-2.5 text-end font-semibold">${fmtMoney(x.total)}</td></tr>`).join('')||'<tr><td class="px-5 py-4 text-slate-400">No sales.</td></tr>'}
+        </tbody></table>
+      </div>
+      <div class="bg-white rounded-2xl shadow-card overflow-hidden">
+        <div class="px-5 py-3 border-b border-slate-100 font-display font-semibold text-slate-900">By order type</div>
+        <table class="w-full text-sm"><tbody class="divide-y divide-slate-100">
+          ${byType.sort((a,b)=>b.total-a.total).map(x=>`<tr><td class="px-5 py-2.5 font-medium">${escapeHTML(x.label)}</td><td class="px-3 py-2.5 text-end text-slate-500">${x.n}</td><td class="px-5 py-2.5 text-end font-semibold">${fmtMoney(x.total)}</td></tr>`).join('')||'<tr><td class="px-5 py-4 text-slate-400">No sales.</td></tr>'}
+        </tbody></table>
+      </div>
+    </div>`;
+}
+
+function reportProductsMix(data) {
+  const doneIds = new Set(reportDone(data).map(o=>o.id));
+  const lines = data.items.filter(l => doneIds.has(l.orderId));
+  const byItem = {};
+  lines.forEach(l => { const k=l.nameEn; (byItem[k]=byItem[k]||{name:l.nameEn, nameAr:l.nameAr, qty:0, rev:0}); byItem[k].qty+=l.qty; byItem[k].rev+=l.lineTotal; });
+  const items = Object.values(byItem).sort((a,b)=>b.rev-a.rev);
+  const mods = {};
+  lines.forEach(l => (l.modifiers||[]).forEach(m => { mods[m.nameEn]=(mods[m.nameEn]||0)+l.qty; }));
+  const modList = Object.entries(mods).sort((a,b)=>b[1]-a[1]).slice(0,15);
+  return `
+    <div class="flex justify-end mb-3"><button onclick="exportReportCSV('products')" class="btn btn-ghost btn-sm">⭳ CSV</button></div>
+    <div class="grid lg:grid-cols-3 gap-4">
+      <div class="lg:col-span-2 bg-white rounded-2xl shadow-card overflow-hidden">
+        <div class="px-5 py-3 border-b border-slate-100 font-display font-semibold text-slate-900">Products — ${items.length}</div>
+        <div class="overflow-x-auto"><table class="w-full text-sm">
+          <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100"><th class="text-start px-5 py-2">Product</th><th class="text-end px-3 py-2">Qty</th><th class="text-end px-5 py-2">Revenue</th></tr></thead>
+          <tbody class="divide-y divide-slate-100">
+            ${items.map(x=>`<tr><td class="px-5 py-2.5 font-medium">${escapeHTML(x.name)}${x.nameAr?` <span dir="rtl" class="text-slate-400 text-xs">${escapeHTML(x.nameAr)}</span>`:''}</td><td class="px-3 py-2.5 text-end tabular-nums">${x.qty}</td><td class="px-5 py-2.5 text-end font-semibold tabular-nums">${fmtMoney(x.rev)}</td></tr>`).join('')||'<tr><td colspan="3" class="px-5 py-6 text-center text-slate-400">No sales in this range.</td></tr>'}
+          </tbody></table></div>
+      </div>
+      <div class="bg-white rounded-2xl shadow-card overflow-hidden h-fit">
+        <div class="px-5 py-3 border-b border-slate-100 font-display font-semibold text-slate-900">Top modifiers</div>
+        <table class="w-full text-sm"><tbody class="divide-y divide-slate-100">
+          ${modList.map(([n,q])=>`<tr><td class="px-5 py-2 font-medium">${escapeHTML(n)}</td><td class="px-5 py-2 text-end tabular-nums font-semibold">${q}</td></tr>`).join('')||'<tr><td class="px-5 py-4 text-slate-400 text-xs">No modifiers used.</td></tr>'}
+        </tbody></table>
+      </div>
+    </div>`;
+}
+
+function reportPayments(data) {
+  const doneIds = new Set(reportDone(data).map(o=>o.id));
+  const pays = data.payments.filter(p => doneIds.has(p.orderId));
+  const label = { cash:'Cash', mada:'mada', card:'Card', stc_pay:'STC Pay', keeta:'KEETA', ninja:'NINJA', koinz:'Koinz', other:'Other' };
+  const byMethod = {}; pays.forEach(p => { byMethod[p.method]=(byMethod[p.method]||{amt:0,n:0}); byMethod[p.method].amt+=p.amount; byMethod[p.method].n++; });
+  const rows = Object.entries(byMethod).sort((a,b)=>b[1].amt-a[1].amt);
+  const total = rows.reduce((s,[,v])=>s+v.amt,0);
+  return `
+    <div class="flex justify-end mb-3"><button onclick="exportReportCSV('payments')" class="btn btn-ghost btn-sm">⭳ CSV</button></div>
+    <div class="bg-white rounded-2xl shadow-card overflow-hidden max-w-2xl">
+      <div class="px-5 py-3 border-b border-slate-100 font-display font-semibold text-slate-900">Payments collected — ${fmtMoney(total)} ${escapeHTML(state.settings.currency)}</div>
+      <table class="w-full text-sm">
+        <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100"><th class="text-start px-5 py-2">Method</th><th class="text-end px-3 py-2">Count</th><th class="text-end px-3 py-2">Share</th><th class="text-end px-5 py-2">Amount</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${rows.map(([m,v])=>`<tr><td class="px-5 py-2.5 font-medium">${label[m]||m}</td><td class="px-3 py-2.5 text-end text-slate-500">${v.n}</td><td class="px-3 py-2.5 text-end text-slate-500">${total?Math.round(v.amt/total*100):0}%</td><td class="px-5 py-2.5 text-end font-semibold tabular-nums">${fmtMoney(v.amt)}</td></tr>`).join('')||'<tr><td colspan="4" class="px-5 py-6 text-center text-slate-400">No payments in this range.</td></tr>'}
+        </tbody></table>
+    </div>`;
+}
+
+function reportTills(data) {
+  const closed = data.shifts.filter(s => s.status==='closed').sort((a,b)=>(b.closedAt||'').localeCompare(a.closedAt||''));
+  const open = data.shifts.filter(s => s.status==='open');
+  return `
+    <div class="flex justify-end mb-3"><button onclick="exportReportCSV('tills')" class="btn btn-ghost btn-sm">⭳ CSV</button></div>
+    ${open.length?`<div class="bg-amber-50 border border-amber-100 rounded-xl px-4 py-2 mb-4 text-sm text-amber-800">${open.length} till${open.length===1?'':'s'} still open in this range — not yet reconciled.</div>`:''}
+    <div class="bg-white rounded-2xl shadow-card overflow-hidden">
+      <div class="overflow-x-auto"><table class="w-full text-sm">
+        <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
+          <th class="text-start px-5 py-2">Branch</th><th class="text-start px-3 py-2">Opened by</th><th class="text-start px-3 py-2">Closed</th>
+          <th class="text-end px-3 py-2">Float</th><th class="text-end px-3 py-2">Expected</th><th class="text-end px-3 py-2">Counted</th><th class="text-end px-5 py-2">Over/Short</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${closed.map(s=>{const os=s.overShort||0; return `<tr>
+            <td class="px-5 py-2.5 font-medium">${escapeHTML(branchName(s.branchId))}</td>
+            <td class="px-3 py-2.5 text-slate-600">${escapeHTML(staffName(s.openedBy))}</td>
+            <td class="px-3 py-2.5 text-slate-500">${fmtDateTime(s.closedAt)}</td>
+            <td class="px-3 py-2.5 text-end tabular-nums">${fmtMoney(s.openingFloat)}</td>
+            <td class="px-3 py-2.5 text-end tabular-nums">${fmtMoney(s.expectedCash||0)}</td>
+            <td class="px-3 py-2.5 text-end tabular-nums">${fmtMoney(s.countedCash||0)}</td>
+            <td class="px-5 py-2.5 text-end tabular-nums font-semibold ${Math.abs(os)<0.005?'text-emerald-700':'text-rose-600'}">${Math.abs(os)<0.005?'✓ 0.00':(os>0?'+':'')+fmtMoney(os)}</td>
+          </tr>`;}).join('')||'<tr><td colspan="7" class="px-5 py-6 text-center text-slate-400">No closed tills in this range.</td></tr>'}
+        </tbody></table></div>
+    </div>`;
+}
+
+function exportReportCSV(tab) {
+  const data = state.reportCache[reportRangeKey()];
+  if (!data) { toast('Still loading — try again in a moment', 'error'); return; }
+  const done = reportDone(data);
+  const doneIds = new Set(done.map(o=>o.id));
+  let rows = [];
+  if (tab === 'sales') {
+    rows = [['Date','Orders','Net sales','VAT','Discounts']];
+    const byDay = {}; done.forEach(o=>{const d=byDay[o.businessDate]=byDay[o.businessDate]||{n:0,net:0,vat:0,disc:0}; d.n++; d.net+=o.total; d.vat+=o.vatAmount; d.disc+=o.discountAmount;});
+    Object.keys(byDay).sort().forEach(d=>rows.push([d, byDay[d].n, byDay[d].net.toFixed(2), byDay[d].vat.toFixed(2), byDay[d].disc.toFixed(2)]));
+  } else if (tab === 'products') {
+    rows = [['Product','Arabic','Qty','Revenue']];
+    const byItem={}; data.items.filter(l=>doneIds.has(l.orderId)).forEach(l=>{const x=byItem[l.nameEn]=byItem[l.nameEn]||{ar:l.nameAr,qty:0,rev:0}; x.qty+=l.qty; x.rev+=l.lineTotal;});
+    Object.entries(byItem).sort((a,b)=>b[1].rev-a[1].rev).forEach(([n,x])=>rows.push([n,x.ar,x.qty,x.rev.toFixed(2)]));
+  } else if (tab === 'payments') {
+    rows = [['Method','Count','Amount']];
+    const byM={}; data.payments.filter(p=>doneIds.has(p.orderId)).forEach(p=>{const x=byM[p.method]=byM[p.method]||{n:0,amt:0}; x.n++; x.amt+=p.amount;});
+    Object.entries(byM).forEach(([m,x])=>rows.push([m,x.n,x.amt.toFixed(2)]));
+  } else {
+    rows = [['Branch','Opened by','Closed at','Float','Expected','Counted','Over/Short']];
+    data.shifts.filter(s=>s.status==='closed').forEach(s=>rows.push([branchName(s.branchId), staffName(s.openedBy), s.closedAt||'', (s.openingFloat||0).toFixed(2), (s.expectedCash||0).toFixed(2), (s.countedCash||0).toFixed(2), (s.overShort||0).toFixed(2)]));
+  }
+  const csv = rows.map(r => r.map(csvCell).join(',')).join('\n');
+  const url = URL.createObjectURL(new Blob(['﻿'+csv], { type: 'text/csv' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = `hassad-${tab}-${reportState.from}_${reportState.to}.csv`;
+  a.click(); setTimeout(()=>URL.revokeObjectURL(url), 5000);
+}
+// CSV cell with formula-injection guard (leading =+-@ get a quote prefix).
+function csvCell(v) {
+  let s = String(v ?? '');
+  if (/^[=+\-@]/.test(s)) s = "'" + s;
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
 /* -------------------- DASHBOARD -------------------- */
