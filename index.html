@@ -303,7 +303,6 @@ function navItems() {
     { key:'orders',    label:'Orders',    show: true },
     { key:'menu',      label:'Menu',      show: hasRole('admin','manager') },
     { key:'branches',  label:'Branches',  show: isAdmin() },
-    { key:'devices',   label:'Devices',   show: hasRole('admin','manager') },
     { key:'staff',     label:'Staff',     show: isAdmin() },
     { key:'settings',  label:'Settings',  show: isAdmin() },
   ].filter(n => n.show);
@@ -334,7 +333,7 @@ function renderMain() {
     case 'menu':      content = hasRole('admin','manager') ? renderMenu() : renderPos(); break;
     case 'item':      content = hasRole('admin','manager') ? renderItemProfile(getRouteArg()) : renderPos(); break;
     case 'branches':  content = isAdmin() ? renderBranches() : renderPos(); break;
-    case 'devices':   content = hasRole('admin','manager') ? renderDevices() : renderPos(); break;
+    case 'devices':   content = renderDevices(); break; // POS-side page: cashiers view their branch, managers edit
     case 'staff':     content = isAdmin() ? renderStaff() : renderPos(); break;
     case 'settings':  content = isAdmin() ? renderSettings() : renderPos(); break;
     default:          content = renderPos();
@@ -610,6 +609,7 @@ function renderPos() {
         <p class="text-sm text-slate-500 mt-2">Open the till with your counted cash float to start selling.</p>
         ${lastClosed ? `<div class="bg-slate-50 rounded-xl p-3 text-xs text-slate-600 mt-4">Last shift closed ${fmtDateTime(lastClosed.closedAt)} — ${lastClosed.overShort === 0 ? 'balanced ✓' : (lastClosed.overShort > 0 ? 'over +' : 'short −') + fmtMoney(Math.abs(lastClosed.overShort))}</div>` : ''}
         <button onclick="openTillModal()" class="btn btn-primary w-full mt-5 !py-3 !text-base">Open till</button>
+        <button onclick="location.hash='#/devices'" class="btn btn-ghost w-full mt-2 !text-xs">Devices</button>
       </div>`;
   }
   const cats = state.categories.filter(c => c.active).sort((a,b) => a.sortOrder - b.sortOrder);
@@ -630,6 +630,7 @@ function renderPos() {
       <span class="text-slate-500">since ${fmtDateTime(shift.openedAt)} · float ${fmtMoney(shift.openingFloat)} · ${escapeHTML(staffName(shift.openedBy))}</span>
       <div class="ms-auto flex gap-1.5">
         <button onclick="openDrawerModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Drawer</button>
+        <button onclick="location.hash='#/devices'" class="btn btn-ghost !py-1 !px-3 !text-xs">Devices</button>
         <button onclick="openCloseTillModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Close till</button>
       </div>
     </div>
@@ -1626,12 +1627,20 @@ function deviceCategorySet(deviceId) {
   return rows.length ? new Set(rows.map(x => x.categoryId)) : null;
 }
 function renderDevices() {
+  // Lives on the POS side (Foodics puts it under the console's More menu):
+  // the counter device is what talks to the printers. Cashiers see their
+  // own branch read-only; admin/manager see and edit everything.
+  const canEdit = hasRole('admin','manager');
+  const visibleBranches = state.branches.filter(b => b.active && (canEdit || b.id === posBranchId()));
   return `
-    <div class="flex items-center justify-between mb-4">
-      <h2 class="font-display text-2xl font-semibold text-slate-900">Devices</h2>
-      <button onclick="openDeviceModal(null)" class="btn btn-primary">+ Device</button>
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div class="flex items-center gap-3">
+        <a href="#/pos" class="btn btn-ghost !py-1.5 !px-3">← POS</a>
+        <h2 class="font-display text-2xl font-semibold text-slate-900">Devices</h2>
+      </div>
+      ${canEdit ? `<button onclick="openDeviceModal(null)" class="btn btn-primary">+ Device</button>` : ''}
     </div>
-    ${state.branches.filter(b => b.active).map(b => {
+    ${visibleBranches.map(b => {
       const devs = state.devices.filter(d => d.branchId === b.id);
       return `
       <div class="bg-white rounded-2xl shadow-card overflow-hidden mb-4">
@@ -1646,9 +1655,9 @@ function renderDevices() {
                 <div class="text-xs text-slate-500 mt-0.5">${escapeHTML(d.model || '—')} · ${escapeHTML(d.ip || 'no IP')} · ${d.copies} cop${d.copies === 1 ? 'y' : 'ies'} · ${d.orderTypes.map(t => ORDER_TYPES[t] || t).join(', ')}</div>
                 ${d.type === 'kitchen_printer' ? `<div class="text-xs mt-0.5 ${catSet ? 'text-amber-700' : 'text-slate-400'}">${catSet ? `Prints ${catSet.size} categor${catSet.size === 1 ? 'y' : 'ies'} only` : 'Prints all categories'}</div>` : ''}
               </div>
-              ${d.type === 'kitchen_printer' ? `<button onclick="openDeviceCategoriesModal('${d.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Categories</button>` : ''}
-              <button onclick="openDeviceModal('${d.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
-              <button onclick="deleteDevice('${d.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Delete</button>
+              ${canEdit && d.type === 'kitchen_printer' ? `<button onclick="openDeviceCategoriesModal('${d.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Categories</button>` : ''}
+              ${canEdit ? `<button onclick="openDeviceModal('${d.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
+              <button onclick="deleteDevice('${d.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Delete</button>` : ''}
             </div>`;
           }).join('') || '<div class="px-5 py-4 text-sm text-slate-400">No devices for this branch yet.</div>'}
         </div>
