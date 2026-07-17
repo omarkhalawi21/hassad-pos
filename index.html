@@ -985,7 +985,7 @@ async function saveOrder() {
   posCart = []; posDiscount = null; posOrderType = 'pickup'; posOrderNote = '';
   render();
   toast(`Order #${mapped.orderNo} completed`, 'success');
-  printReceipt(mapped.id);
+  printReceipt(mapped.id, 'both'); // customer receipt + bar ticket in one job
   return true;
 }
 
@@ -1014,7 +1014,8 @@ function renderOrders() {
               <td class="px-4 py-2.5 text-end font-semibold">${fmtMoney(o.total)}${o.discountAmount > 0 ? ` <span class="text-[10px] text-emerald-700">(−${fmtMoney(o.discountAmount)})</span>` : ''}</td>
               <td class="px-4 py-2.5">${o.status==='void' ? '<span class="badge badge-red">Void</span>' : o.status==='returned' ? '<span class="badge badge-amber">Returned</span>' : '<span class="badge badge-green">Completed</span>'}</td>
               <td class="px-4 py-2.5 text-end whitespace-nowrap">
-                <button onclick="printReceipt('${o.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Receipt</button>
+                <button onclick="printReceipt('${o.id}','customer')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Receipt</button>
+                <button onclick="printReceipt('${o.id}','bar')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Bar</button>
                 ${hasRole('admin','manager') && o.status==='completed' ? `
                 <button onclick="returnOrder('${o.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Return</button>
                 <button onclick="voidOrder('${o.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Void</button>` : ''}
@@ -1078,25 +1079,18 @@ function openPrintWindow(html) {
   if (!w) toast('Popup blocked — allow popups to print receipts', 'error');
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
-async function printReceipt(orderId) {
+// mode: 'customer' (ZATCA receipt), 'bar' (kitchen/bar ticket, no prices),
+// or 'both' — one print job, customer copy then a page-break (= cut on
+// thermal roll printers) then the bar ticket. Their branch has ONE
+// printer serving both roles, so one job is the right default at checkout.
+async function printReceipt(orderId, mode = 'customer') {
   const order = state.orders.find(o => o.id === orderId);
   if (!order) return;
   const detail = await loadOrderDetail(orderId);
   const s = state.settings;
   const qrUrl = zatcaQrDataUrl(order);
   const payLabel = { cash:'Cash', mada:'mada', card:'Card', stc_pay:'STC Pay', keeta:'KEETA', ninja:'NINJA', koinz:'Koinz', other:'Other' };
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt #${order.orderNo}</title><style>
-    @page { size: 80mm auto; margin: 3mm; }
-    body { font-family: -apple-system, 'Segoe UI', sans-serif; width: 72mm; margin: 0 auto; font-size: 11px; color: #000; }
-    .c { text-align: center; } .b { font-weight: 700; }
-    .row { display: flex; justify-content: space-between; gap: 6px; }
-    hr { border: 0; border-top: 1px dashed #000; margin: 6px 0; }
-    table { width: 100%; border-collapse: collapse; } td { padding: 1px 0; vertical-align: top; }
-    .ar { direction: rtl; font-family: -apple-system, 'Segoe UI', sans-serif; }
-    img.qr { width: 30mm; height: 30mm; display:block; margin: 6px auto; }
-    .btnbar { position: fixed; top: 0; right: 0; padding: 6px; } @media print { .btnbar { display: none; } }
-  </style></head><body>
-    <div class="btnbar"><button onclick="print()">Print</button></div>
+  const customerBody = `
     <div class="c b" style="font-size:14px">${escapeHTML(s.companyName)}</div>
     ${s.companyNameAr ? `<div class="c ar">${escapeHTML(s.companyNameAr)}</div>` : ''}
     ${s.vatNumber ? `<div class="c">VAT: ${escapeHTML(s.vatNumber)}</div>` : ''}
@@ -1127,7 +1121,42 @@ async function printReceipt(orderId) {
       ${p.method==='cash' && p.tendered != null ? `<div class="row"><span>Tendered / Change</span><span>${fmtMoney(p.tendered)} / ${fmtMoney(p.changeGiven || 0)}</span></div>` : ''}`).join('')}
     ${qrUrl ? `<img class="qr" src="${qrUrl}" alt="ZATCA QR">` : ''}
     ${s.receiptFooterEn ? `<div class="c">${escapeHTML(s.receiptFooterEn)}</div>` : ''}
-    ${s.receiptFooterAr ? `<div class="c ar">${escapeHTML(s.receiptFooterAr)}</div>` : ''}
+    ${s.receiptFooterAr ? `<div class="c ar">${escapeHTML(s.receiptFooterAr)}</div>` : ''}`;
+
+  // Bar/kitchen ticket: what the barista needs and nothing else — big
+  // order number, type, items with modifiers loud, note highlighted.
+  // No prices, no VAT, no QR.
+  const barBody = `
+    <div class="c b" style="font-size:26px; margin-top:2mm">#${order.orderNo}</div>
+    <div class="c b" style="font-size:13px">${ORDER_TYPES[order.orderType] || 'Pickup'}</div>
+    <div class="c" style="font-size:10px">${fmtDateTime(order.createdAt)} · ${escapeHTML(branchName(order.branchId))} · ${escapeHTML(staffName(order.cashierId))}</div>
+    ${order.status !== 'completed' ? `<div class="c b" style="font-size:14px">*** ${order.status.toUpperCase()} ***</div>` : ''}
+    ${order.note ? `<div class="b" style="border:1.5px solid #000; padding:2mm; margin:2mm 0; font-size:12px">📝 ${escapeHTML(order.note)}</div>` : ''}
+    <hr>
+    ${detail.items.map(l => `
+      <div style="margin:2.5mm 0">
+        <div class="b" style="font-size:14px">${l.qty} × ${escapeHTML(l.nameEn)}</div>
+        ${l.nameAr ? `<div class="ar b" style="font-size:12px">${escapeHTML(l.nameAr)}</div>` : ''}
+        ${(l.modifiers || []).map(m => `<div class="b" style="font-size:12px; padding-inline-start:6mm">▸ ${escapeHTML(m.nameEn)}${m.nameAr ? ` <span class="ar">${escapeHTML(m.nameAr)}</span>` : ''}</div>`).join('')}
+      </div>`).join('')}
+    <hr>
+    <div class="c" style="font-size:9px">BAR TICKET — not a tax invoice</div>`;
+
+  const parts = mode === 'both' ? [customerBody, barBody] : mode === 'bar' ? [barBody] : [customerBody];
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Order #${order.orderNo}</title><style>
+    @page { size: 80mm auto; margin: 3mm; }
+    body { font-family: -apple-system, 'Segoe UI', sans-serif; width: 72mm; margin: 0 auto; font-size: 11px; color: #000; }
+    .c { text-align: center; } .b { font-weight: 700; }
+    .row { display: flex; justify-content: space-between; gap: 6px; }
+    hr { border: 0; border-top: 1px dashed #000; margin: 6px 0; }
+    table { width: 100%; border-collapse: collapse; } td { padding: 1px 0; vertical-align: top; }
+    .ar { direction: rtl; font-family: -apple-system, 'Segoe UI', sans-serif; }
+    img.qr { width: 30mm; height: 30mm; display:block; margin: 6px auto; }
+    .cut { page-break-before: always; }
+    .btnbar { position: fixed; top: 0; right: 0; padding: 6px; } @media print { .btnbar { display: none; } }
+  </style></head><body>
+    <div class="btnbar"><button onclick="print()">Print</button></div>
+    ${parts.map((p, i) => i === 0 ? p : `<div class="cut"></div>${p}`).join('')}
   </body></html>`;
   openPrintWindow(html);
 }
