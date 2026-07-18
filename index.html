@@ -770,14 +770,14 @@ function renderPos() {
         <div class="flex gap-1 overflow-x-auto pb-2 mb-3 ${q ? 'opacity-40' : ''}">
           ${cats.map(c => `<button onclick="posSearchQ=''; posCategoryId='${c.id}'; render();" class="tab whitespace-nowrap ${!q && posCategoryId===c.id?'active':''}">${escapeHTML(c.nameEn)}</button>`).join('') || '<span class="text-sm text-slate-400">No categories yet — add them under Menu.</span>'}
         </div>
-        <div class="grid grid-cols-3 sm:grid-cols-4 xl:grid-cols-5 gap-2.5">
+        <div class="grid grid-cols-4 sm:grid-cols-5 xl:grid-cols-6 gap-2">
           ${items.map(i => `
             <button onclick="addToCart('${i.id}')" class="pos-item bg-white rounded-xl shadow-card overflow-hidden text-start hover:shadow-pop">
-              ${safePhoto(i.photo) ? `<img src="${safePhoto(i.photo)}" class="w-full h-16 object-cover" alt="">` : ''}
-              <div class="p-2.5 ${safePhoto(i.photo) ? '!pt-2' : ''}">
-                <div class="text-sm font-semibold text-slate-900 leading-tight">${escapeHTML(i.nameEn)}</div>
-                ${i.nameAr ? `<div class="text-[11px] text-slate-500 mt-0.5" dir="rtl">${escapeHTML(i.nameAr)}</div>` : ''}
-                <div class="text-brand-700 font-bold text-sm mt-1">${fmtMoney(i.price)} <span class="text-[10px] font-medium">${escapeHTML(state.settings.currency)}</span></div>
+              ${safePhoto(i.photo) ? `<img src="${safePhoto(i.photo)}" class="w-full h-14 object-cover" alt="">` : ''}
+              <div class="p-2 ${safePhoto(i.photo) ? '!pt-1.5' : ''}">
+                <div class="text-[13px] font-semibold text-slate-900 leading-tight">${escapeHTML(i.nameEn)}</div>
+                ${i.nameAr ? `<div class="text-[10px] text-slate-500 mt-0.5" dir="rtl">${escapeHTML(i.nameAr)}</div>` : ''}
+                <div class="text-brand-700 font-bold text-[13px] mt-0.5">${fmtMoney(i.price)} <span class="text-[10px] font-medium">${escapeHTML(state.settings.currency)}</span></div>
               </div>
             </button>`).join('') || '<div class="col-span-full text-sm text-slate-400 bg-white rounded-2xl shadow-card p-8 text-center">No items in this category for this branch.</div>'}
         </div>
