@@ -121,7 +121,8 @@ function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.n
 function mapStaffFromDb(r) {
   return { id: r.id, userId: r.user_id, email: r.email || '', firstName: r.first_name || '', lastName: r.last_name || '',
     role: r.role || 'cashier', branchId: r.branch_id, active: !!r.active,
-    consoleAccess: !!r.console_access, appAccess: r.app_access !== false };
+    consoleAccess: !!r.console_access, appAccess: r.app_access !== false,
+    employeeNumber: r.employee_number || '', phone: r.phone || '' };
 }
 // Permission catalog — the keys roles can grant. `role` (admin/manager/
 // cashier) remains the DATA authority enforced by RLS; these decide which
@@ -347,7 +348,7 @@ async function logout() {
 }
 
 /* -------------------- ROUTING / SHELL -------------------- */
-const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'reports', 'branches', 'staff', 'roles', 'devices', 'display', 'settings'];
+const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'reports', 'branches', 'staff', 'user', 'roles', 'devices', 'display', 'settings'];
 let authMode = 'login';
 function getRoute() {
   const h = (location.hash || '').replace(/^#\/?/, '').split('/')[0];
@@ -409,6 +410,7 @@ function renderMain() {
     case 'branches':  content = can('console.branches') ? renderBranches() : denied(); break;
     case 'devices':   content = (hasApp() || can('console.devices')) ? renderDevices() : denied(); break;
     case 'staff':     content = can('console.staff') ? renderStaff() : denied(); break;
+    case 'user':      content = can('console.staff') ? renderUserProfile(getRouteArg()) : denied(); break;
     case 'roles':     content = can('console.staff') ? renderRoles() : denied(); break;
     case 'settings':  content = can('console.settings') ? renderSettings() : denied(); break;
     default:          content = denied();
@@ -2326,7 +2328,7 @@ function renderStaff() {
             const names = staffRoleNames(s.id);
             return `
             <tr class="${s.active ? '' : 'opacity-50'}">
-              <td class="px-4 py-2.5 font-medium">${escapeHTML((s.firstName + ' ' + s.lastName).trim() || '—')}</td>
+              <td class="px-4 py-2.5 font-medium"><a href="#/user/${s.id}" class="hover:text-brand-700 hover:underline">${escapeHTML((s.firstName + ' ' + s.lastName).trim() || '—')}</a></td>
               <td class="px-4 py-2.5 text-slate-600">${escapeHTML(s.email)}</td>
               <td class="px-4 py-2.5"><span class="badge badge-slate">${escapeHTML(s.role)}</span></td>
               <td class="px-4 py-2.5">${s.consoleAccess || s.role === 'admin' ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Off</span>'}</td>
@@ -2349,35 +2351,36 @@ function openStaffModal(id) {
         <div><label class="label">First name</label><input id="st-first" class="input" value="${escapeHTML(editing?.firstName || '')}"></div>
         <div><label class="label">Last name</label><input id="st-last" class="input" value="${escapeHTML(editing?.lastName || '')}"></div>
       </div>
-      <div><label class="label">Email</label><input id="st-email" type="email" class="input" value="${escapeHTML(editing?.email || '')}" ${editing?.userId ? 'disabled' : ''}></div>
       <div class="grid grid-cols-2 gap-3">
-        <div><label class="label">Role</label><select id="st-role" class="input">
-          ${['admin','manager','cashier'].map(r => `<option value="${r}" ${editing?.role === r ? 'selected':''}>${r}</option>`).join('')}</select></div>
+        <div><label class="label">Email</label><input id="st-email" type="email" class="input" value="${escapeHTML(editing?.email || '')}" ${editing?.userId ? 'disabled' : ''}></div>
+        <div><label class="label">Phone</label><input id="st-phone" class="input" value="${escapeHTML(editing?.phone || '')}" placeholder="05XXXXXXXX"></div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Employee number</label><input id="st-empno" class="input" value="${escapeHTML(editing?.employeeNumber || '')}"></div>
+        <div><label class="label">Active</label><select id="st-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Data authority</label><select id="st-role" class="input">
+          ${['admin','manager','cashier'].map(r => `<option value="${r}" ${editing?.role === r ? 'selected':''}>${r}</option>`).join('')}</select>
+          <div class="text-[10px] text-slate-500 mt-1">What the database itself allows. Screens come from roles.</div></div>
         <div><label class="label">Branch</label><select id="st-branch" class="input">
           <option value="">— None —</option>
           ${state.branches.filter(b => b.active).map(b => `<option value="${b.id}" ${editing?.branchId === b.id ? 'selected':''}>${escapeHTML(b.name)}</option>`).join('')}</select></div>
       </div>
-      <div><label class="label">Active</label><select id="st-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
       <div class="border-t border-slate-100 pt-3">
         <label class="label">Access</label>
         <div class="flex gap-4 flex-wrap">
-          <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="st-console" ${(editing ? editing.consoleAccess : false) ? 'checked' : ''}> <span><strong>Back office</strong> — dashboard, reports, menu, settings</span></label>
-          <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="st-app" ${(editing ? editing.appAccess : true) ? 'checked' : ''}> <span><strong>POS</strong> — the till console</span></label>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="st-console" ${(editing ? editing.consoleAccess : false) ? 'checked' : ''}> <strong>Back office</strong></label>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="st-app" ${(editing ? editing.appAccess : true) ? 'checked' : ''}> <strong>POS</strong></label>
         </div>
-        <div class="text-[10px] text-slate-500 mt-1">Independent — a person can have one, both, or neither. Admins always have both.</div>
       </div>
-      <div>
-        <label class="label">Roles (grant specific sections &amp; actions)</label>
-        ${state.posRoles.length ? `<div class="flex gap-3 flex-wrap">
-          ${state.posRoles.map(r => `<label class="flex items-center gap-1.5 text-sm"><input type="checkbox" class="st-role-cb" value="${r.id}" ${editing && state.staffRoles.some(x => x.staffId === editing.id && x.roleId === r.id) ? 'checked' : ''}> ${escapeHTML(r.name)}</label>`).join('')}
-        </div>` : '<div class="text-xs text-slate-400">No roles defined yet — create them under Roles.</div>'}
-      </div>
-      ${!editing ? '<div class="bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-amber-800">Cashiers must have a branch — RLS blocks their orders otherwise.</div>' : ''}
+      ${!editing ? '<div class="bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-amber-800">Cashiers must have a branch — RLS blocks their orders otherwise. Attach roles from their user page after saving.</div>' : ''}
     </div>`, async () => {
     const row = { first_name: $('#st-first').value.trim(), last_name: $('#st-last').value.trim(),
       email: $('#st-email').value.trim().toLowerCase(), role: $('#st-role').value,
       branch_id: $('#st-branch').value || null, active: $('#st-active').value === '1',
-      console_access: $('#st-console').checked, app_access: $('#st-app').checked };
+      console_access: $('#st-console').checked, app_access: $('#st-app').checked,
+      employee_number: $('#st-empno').value.trim() || null, phone: $('#st-phone').value.trim() || null };
     if (!row.email) { toast('Email required', 'error'); return false; }
     if (row.role === 'cashier' && !row.branch_id) { toast('Cashiers need a branch', 'error'); return false; }
     if (!row.console_access && !row.app_access && row.role !== 'admin') { toast('Give them Back office, POS, or both — otherwise they cannot use the app', 'error'); return false; }
@@ -2386,16 +2389,155 @@ function openStaffModal(id) {
                       : sb.from('staff').insert(row).select().single();
     const { data, error } = await q;
     if (error) { toast(humanizeError(error), 'error'); return false; }
-    // Rewrite this person's role assignments.
-    const staffId = data.id;
-    const wanted = [...document.querySelectorAll('.st-role-cb:checked')].map(cb => cb.value);
-    await sb.from('staff_roles').delete().eq('staff_id', staffId);
-    if (wanted.length) {
-      const { error: rErr } = await sb.from('staff_roles').insert(wanted.map(rid => ({ staff_id: staffId, role_id: rid })));
-      if (rErr) { toast('Saved, but roles failed: ' + humanizeError(rErr), 'error'); }
-    }
-    await loadAll(); render(); toast('Saved', 'success');
+    const isNew = !editing;
+    await loadAll();
+    // New users land on their profile so roles can be attached next.
+    if (isNew && data?.id) location.hash = '#/user/' + data.id;
+    render(); toast(isNew ? 'User created — attach roles below' : 'Saved', 'success');
   });
+}
+
+/* -------------------- USER PROFILE -------------------- */
+// Mirrors the Foodics user page: a details card, then Roles / Access /
+// Branch as separate sections each with its own Edit action. Roles are
+// simply attached here — they're authored on the Roles page.
+function renderUserProfile(id) {
+  const s = state.staff.find(x => x.id === id);
+  if (!s) return `<div class="bg-white rounded-2xl shadow-card p-10 text-center text-slate-400">User not found. <a href="#/staff" class="text-brand-700 hover:underline">Back to Staff</a></div>`;
+  const names = staffRoleNames(s.id);
+  const field = (label, value) => `
+    <div>
+      <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">${label}</div>
+      <div class="mt-0.5 border-b border-slate-100 pb-1.5">${value || '<span class="text-slate-300">—</span>'}</div>
+    </div>`;
+  const section = (title, action, body) => `
+    <div class="mt-6">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="font-display text-lg font-semibold text-slate-900">${title}</h3>
+        ${action}
+      </div>
+      <div class="bg-white rounded-2xl shadow-card overflow-hidden">${body}</div>
+    </div>`;
+  return `
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div class="flex items-center gap-3">
+        <a href="#/staff" class="btn btn-ghost !py-1.5 !px-3">← Staff</a>
+        <h2 class="font-display text-2xl font-semibold text-slate-900">${escapeHTML((s.firstName + ' ' + s.lastName).trim() || s.email)}</h2>
+        ${s.active ? '' : '<span class="badge badge-slate">Inactive</span>'}
+      </div>
+      <div class="flex gap-2">
+        ${isAdmin() ? `<button onclick="openDeleteStaffModal('${s.id}')" class="btn btn-danger">Delete</button>` : ''}
+        <button onclick="openStaffModal('${s.id}')" class="btn btn-primary">Edit User</button>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-2xl shadow-card p-6">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
+        ${field('Name', escapeHTML((s.firstName + ' ' + s.lastName).trim()))}
+        ${field('Email', escapeHTML(s.email))}
+        ${field('Employee Number', escapeHTML(s.employeeNumber))}
+        ${field('Phone', escapeHTML(s.phone))}
+        ${field('Login', s.userId ? '<span class="badge badge-green">Linked</span>' : '<span class="badge badge-amber">Awaiting signup</span>')}
+        ${field('Data authority', `<span class="badge badge-slate">${escapeHTML(s.role)}</span>`)}
+      </div>
+    </div>
+
+    ${section('Access',
+      `<button onclick="openAccessModal('${s.id}')" class="btn btn-ghost !py-1.5 !px-3 !text-sm">Edit Access</button>`,
+      `<div class="p-5 flex gap-8 flex-wrap">
+        <div>
+          <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Back office</div>
+          <div class="mt-1">${s.consoleAccess || s.role === 'admin' ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}</div>
+        </div>
+        <div>
+          <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">POS</div>
+          <div class="mt-1">${s.appAccess || s.role === 'admin' ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}</div>
+        </div>
+      </div>`)}
+
+    ${section('Roles',
+      `<button onclick="openEditRolesModal('${s.id}')" class="btn btn-ghost !py-1.5 !px-3 !text-sm">Edit Roles</button>`,
+      names.length
+        ? `<div class="divide-y divide-slate-100">${names.map(n => `<div class="px-5 py-3">${escapeHTML(n)}</div>`).join('')}</div>`
+        : `<div class="px-5 py-6 text-sm text-slate-400">No roles attached${s.role === 'admin' ? ' — admins already have every permission.' : ' — this person can sign in but sees nothing until a role is attached.'}</div>`)}
+
+    ${section('Branch',
+      `<button onclick="openBranchModal2('${s.id}')" class="btn btn-ghost !py-1.5 !px-3 !text-sm">Edit Branch</button>`,
+      s.branchId
+        ? `<table class="w-full text-sm">
+            <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
+              <th class="text-start px-5 py-2">Name</th><th class="text-start px-5 py-2">Role at branch</th></tr></thead>
+            <tbody><tr><td class="px-5 py-3">${escapeHTML(branchName(s.branchId))}</td><td class="px-5 py-3 text-slate-500">${escapeHTML(s.role)}</td></tr></tbody>
+          </table>`
+        : `<div class="px-5 py-6 text-sm text-slate-400">No branch assigned${s.role === 'cashier' ? ' — cashiers need one before they can ring orders.' : ' — admins and managers reach every branch.'}</div>`)}`;
+}
+function openAccessModal(id) {
+  const s = state.staff.find(x => x.id === id); if (!s) return;
+  openModal('Access — ' + ((s.firstName + ' ' + s.lastName).trim() || s.email), `
+    <div class="space-y-3">
+      <label class="flex items-start gap-2.5 text-sm"><input type="checkbox" id="ac-console" class="mt-0.5" ${s.consoleAccess ? 'checked' : ''}>
+        <span><strong>Back office</strong><div class="text-xs text-slate-500">Dashboard, reports, menu, settings — whichever their roles allow.</div></span></label>
+      <label class="flex items-start gap-2.5 text-sm"><input type="checkbox" id="ac-app" class="mt-0.5" ${s.appAccess ? 'checked' : ''}>
+        <span><strong>POS</strong><div class="text-xs text-slate-500">The till console for taking orders.</div></span></label>
+      ${s.role === 'admin' ? '<div class="bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-amber-800">This person is an <strong>admin</strong> — they keep full access regardless of these switches.</div>' : ''}
+    </div>`, async () => {
+    const row = { console_access: $('#ac-console').checked, app_access: $('#ac-app').checked };
+    if (!row.console_access && !row.app_access && s.role !== 'admin') { toast('Give them Back office, POS, or both', 'error'); return false; }
+    const { error } = await sb.from('staff').update(row).eq('id', id);
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    await loadAll(); render(); toast('Access updated', 'success');
+  });
+}
+function openEditRolesModal(id) {
+  const s = state.staff.find(x => x.id === id); if (!s) return;
+  openModal('Roles — ' + ((s.firstName + ' ' + s.lastName).trim() || s.email), `
+    <div class="space-y-2">
+      ${state.posRoles.length ? state.posRoles.map(r => `
+        <label class="flex items-start gap-2.5 text-sm py-1">
+          <input type="checkbox" class="er-role mt-0.5" value="${r.id}" ${state.staffRoles.some(x => x.staffId === id && x.roleId === r.id) ? 'checked' : ''}>
+          <span><strong>${escapeHTML(r.name)}</strong>
+          <div class="text-xs text-slate-500">${r.permissions.length ? r.permissions.map(p => escapeHTML((PERMISSIONS.find(x => x[0] === p) || [p, p])[1])).join(', ') : 'No permissions'}</div></span>
+        </label>`).join('') : '<div class="text-sm text-slate-400">No roles exist yet — create them on the Roles page.</div>'}
+    </div>`, async () => {
+    const wanted = [...document.querySelectorAll('.er-role:checked')].map(cb => cb.value);
+    await sb.from('staff_roles').delete().eq('staff_id', id);
+    if (wanted.length) {
+      const { error } = await sb.from('staff_roles').insert(wanted.map(rid => ({ staff_id: id, role_id: rid })));
+      if (error) { toast(humanizeError(error), 'error'); return false; }
+    }
+    await loadAll(); render(); toast('Roles updated', 'success');
+  });
+}
+function openBranchModal2(id) {
+  const s = state.staff.find(x => x.id === id); if (!s) return;
+  openModal('Branch — ' + ((s.firstName + ' ' + s.lastName).trim() || s.email), `
+    <div>
+      <label class="label">Branch</label>
+      <select id="bm-branch" class="input">
+        <option value="">— None —</option>
+        ${state.branches.filter(b => b.active).map(b => `<option value="${b.id}" ${s.branchId === b.id ? 'selected' : ''}>${escapeHTML(b.name)}</option>`).join('')}
+      </select>
+      <div class="text-xs text-slate-500 mt-2">Cashiers are locked to their branch by the database itself. Admins and managers reach every branch regardless.</div>
+    </div>`, async () => {
+    const branch_id = $('#bm-branch').value || null;
+    if (s.role === 'cashier' && !branch_id) { toast('Cashiers need a branch', 'error'); return false; }
+    const { error } = await sb.from('staff').update({ branch_id }).eq('id', id);
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    await loadAll(); render(); toast('Branch updated', 'success');
+  });
+}
+function openDeleteStaffModal(id) {
+  const s = state.staff.find(x => x.id === id); if (!s) return;
+  openModal('Delete user', `
+    <div class="space-y-3">
+      <p class="text-sm text-slate-700">Remove <strong>${escapeHTML((s.firstName + ' ' + s.lastName).trim() || s.email)}</strong> from staff?</p>
+      <div class="bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-amber-800">Their past orders and till reconciliations stay intact. ${s.userId ? 'Their login still exists in Supabase Auth — delete it there too if they should lose access entirely.' : ''} To keep the history and just stop access, set them <strong>Inactive</strong> instead.</div>
+    </div>`, async () => {
+    const { error } = await sb.from('staff').delete().eq('id', id);
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    location.hash = '#/staff';
+    await loadAll(); render(); toast('User deleted', 'success');
+  }, { saveLabel: 'Delete' });
 }
 
 /* -------------------- ROLES -------------------- */
@@ -2405,29 +2547,23 @@ function renderRoles() {
       <h2 class="font-display text-2xl font-semibold text-slate-900">Roles</h2>
       ${isAdmin() ? `<button onclick="openRoleModal(null)" class="btn btn-primary">+ Role</button>` : ''}
     </div>
-    <div class="bg-white rounded-2xl shadow-card overflow-hidden">
-      <table class="w-full text-sm">
-        <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
-          <th class="text-start px-4 py-2.5">Role</th><th class="text-start px-4 py-2.5">Grants</th>
-          <th class="text-start px-4 py-2.5">People</th><th class="px-4 py-2.5"></th></tr></thead>
-        <tbody class="divide-y divide-slate-100">
-          ${state.posRoles.map(r => {
-            const people = state.staffRoles.filter(x => x.roleId === r.id).length;
-            const labels = r.permissions.map(p => (PERMISSIONS.find(x => x[0] === p) || [p, p])[1]);
-            return `
-            <tr>
-              <td class="px-4 py-2.5 font-medium">${escapeHTML(r.name)}</td>
-              <td class="px-4 py-2.5 text-slate-600">${labels.length ? labels.map(l => `<span class="badge badge-slate">${escapeHTML(l)}</span>`).join(' ') : '<span class="text-slate-400">POS only — no extra permissions</span>'}</td>
-              <td class="px-4 py-2.5">${people}</td>
-              <td class="px-4 py-2.5 text-end whitespace-nowrap">
-                ${isAdmin() ? `<button onclick="openRoleModal('${r.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
-                <button onclick="deleteRole('${r.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Delete</button>` : ''}
-              </td>
-            </tr>`;
-          }).join('') || '<tr><td colspan="4" class="text-center text-slate-400 py-10">No roles yet.</td></tr>'}
-        </tbody></table>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      ${state.posRoles.map(r => {
+        const people = state.staffRoles.filter(x => x.roleId === r.id).length;
+        return `
+        <div class="bg-white rounded-2xl shadow-card p-4">
+          <div class="flex items-start justify-between gap-2">
+            <div class="font-display font-semibold text-slate-900">${escapeHTML(r.name)}</div>
+            ${isAdmin() ? `<div class="flex gap-1">
+              <button onclick="openRoleModal('${r.id}')" class="btn btn-ghost !py-1 !px-2 !text-xs">Edit</button>
+              <button onclick="deleteRole('${r.id}')" class="btn btn-danger !py-1 !px-2 !text-xs">×</button>
+            </div>` : ''}
+          </div>
+          <div class="text-xs text-slate-500 mt-2">${r.permissions.length} permission${r.permissions.length === 1 ? '' : 's'} · ${people} ${people === 1 ? 'person' : 'people'}</div>
+        </div>`;
+      }).join('') || '<div class="col-span-full bg-white rounded-2xl shadow-card p-10 text-center text-slate-400">No roles yet.</div>'}
     </div>
-    <p class="text-xs text-slate-500 mt-3">A role is a bundle of permissions you assign to people under Staff. Someone can hold several. Admins always have everything, so they don't need a role.</p>`;
+    <p class="text-xs text-slate-500 mt-4">A role bundles permissions. Attach roles to people from their user page (Staff &rarr; open a user &rarr; Edit Roles). Someone can hold several; admins always have everything.</p>`;
 }
 function openRoleModal(id) {
   const editing = id ? state.posRoles.find(r => r.id === id) : null;

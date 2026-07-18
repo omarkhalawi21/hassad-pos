@@ -948,6 +948,15 @@ SELECT 'Admin', '{console.dashboard,console.reports,console.menu,console.branche
 WHERE NOT EXISTS (SELECT 1 FROM public.pos_roles WHERE name = 'Admin');
 
 -- =============================================================
+-- 16. STAFF PROFILE FIELDS
+--     The Foodics user page carries an employee number and phone
+--     alongside the login details; adding them so our profile page
+--     holds the same record.
+-- =============================================================
+ALTER TABLE public.staff ADD COLUMN IF NOT EXISTS employee_number text;
+ALTER TABLE public.staff ADD COLUMN IF NOT EXISTS phone           text;
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
