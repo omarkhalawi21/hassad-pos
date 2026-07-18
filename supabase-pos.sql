@@ -931,6 +931,23 @@ CREATE POLICY "staff_roles_delete_admin"
   ON public.staff_roles FOR DELETE TO authenticated USING (public.is_admin());
 
 -- =============================================================
+-- 15. "ADMIN" ROLE — every permission in one bundle
+--     Block 14 seeded specialised roles but nothing granting the lot.
+--     This lets you give someone the FULL back office + every POS
+--     action WITHOUT setting staff.role = 'admin'.
+--
+--     The difference matters:
+--       * this ROLE  -> every screen and button in the app
+--       * role='admin' on the staff record -> DATA authority in RLS
+--         (deleting orders, writing settings, managing staff/roles)
+--     So a trusted manager can run the whole console day to day while
+--     the destructive database powers stay with the owner.
+-- =============================================================
+INSERT INTO public.pos_roles (name, permissions)
+SELECT 'Admin', '{console.dashboard,console.reports,console.menu,console.branches,console.staff,console.devices,console.settings,pos.discount,pos.void,pos.return,pos.drawer,pos.close_till}'::text[]
+WHERE NOT EXISTS (SELECT 1 FROM public.pos_roles WHERE name = 'Admin');
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
