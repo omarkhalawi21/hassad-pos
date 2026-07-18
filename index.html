@@ -119,6 +119,22 @@ function mapSettingsFromDb(r) {
     vatRate: Number(r.vat_rate) || 15, receiptFooterEn: r.receipt_footer_en || '', receiptFooterAr: r.receipt_footer_ar || '' };
 }
 function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active }; }
+function mapPayMethodFromDb(r) { return { id: r.id, name: r.name || '', code: r.code || '', active: !!r.active, sort: Number(r.sort_order) || 0 }; }
+// Fallback trio keeps checkout usable until SQL block 17 has been run.
+const DEFAULT_PAY_METHODS = [
+  { id: null, name: 'mada',  code: 'mada',  active: true, sort: 1 },
+  { id: null, name: 'KEETA', code: 'keeta', active: true, sort: 2 },
+  { id: null, name: 'NINJA', code: 'ninja', active: true, sort: 3 },
+];
+function activePayMethods() {
+  const all = state.payMethods || [];
+  return all.length ? all.filter(p => p.active) : DEFAULT_PAY_METHODS;
+}
+function payMethodLabel(code) {
+  const pm = (state.payMethods || []).find(p => p.code === code);
+  if (pm) return pm.name;
+  return ({ cash:'Cash', mada:'mada', card:'Card', stc_pay:'STC Pay', keeta:'KEETA', ninja:'NINJA', koinz:'Koinz', split:'Split', other:'Other' })[code] || code;
+}
 function mapStaffFromDb(r) {
   return { id: r.id, userId: r.user_id, email: r.email || '', firstName: r.first_name || '', lastName: r.last_name || '',
     role: r.role || 'cashier', branchId: r.branch_id, active: !!r.active,
@@ -234,7 +250,7 @@ function staffName(id) { const s = state.staff.find(x => x.id === id); return s 
 /* -------------------- DATA LOAD -------------------- */
 async function loadAll() {
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR, menuGroupsR, itemMenuGroupsR, devicesR, deviceCatsR, posRolesR, staffRolesR] = await Promise.all([
+  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR, menuGroupsR, itemMenuGroupsR, devicesR, deviceCatsR, posRolesR, staffRolesR, payMethodsR] = await Promise.all([
     sb.from('pos_settings').select('*').limit(1).maybeSingle(),
     sb.from('branches').select('*').order('name'),
     sb.from('staff').select('*').order('first_name'),
@@ -262,6 +278,7 @@ async function loadAll() {
     sb.from('device_categories').select('*'),
     sb.from('pos_roles').select('*').order('name'),
     sb.from('staff_roles').select('*'),
+    sb.from('payment_methods').select('*').order('sort_order'),
   ]);
   if (settingsR.data) { const s = mapSettingsFromDb(settingsR.data); state.settingsId = s._id; state.settings = s; }
   state.branches   = (branchesR.data   || []).map(mapBranchFromDb);
@@ -284,6 +301,7 @@ async function loadAll() {
     orderTypes: Array.isArray(r.order_types) ? r.order_types : ['pickup','dine_in','delivery','drive_thru'], active: !!r.active }));
   state.deviceCategories = (deviceCatsR?.data || []).map(r => ({ deviceId: r.device_id, categoryId: r.category_id }));
   state.posRoles   = (posRolesR?.data   || []).map(r => ({ id: r.id, name: r.name || '', permissions: Array.isArray(r.permissions) ? r.permissions : [] }));
+  state.payMethods = (payMethodsR?.data || []).map(mapPayMethodFromDb);
   state.staffRoles = (staffRolesR?.data || []).map(r => ({ staffId: r.staff_id, roleId: r.role_id }));
 }
 async function loadOrderDetail(orderId) {
@@ -349,7 +367,7 @@ async function logout() {
 }
 
 /* -------------------- ROUTING / SHELL -------------------- */
-const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'reports', 'branches', 'staff', 'user', 'roles', 'devices', 'display', 'settings'];
+const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'reports', 'branches', 'staff', 'user', 'roles', 'devices', 'display', 'payments', 'settings'];
 let authMode = 'login';
 function getRoute() {
   const h = (location.hash || '').replace(/^#\/?/, '').split('/')[0];
@@ -370,6 +388,7 @@ function navItems() {
     { key:'branches',  label:'Branches',  show: can('console.branches') },
     { key:'staff',     label:'Staff',     show: can('console.staff') },
     { key:'roles',     label:'Roles',     show: can('console.staff') },
+    { key:'payments',  label:'Payment Methods', show: can('console.settings') },
     { key:'settings',  label:'Settings',  show: can('console.settings') },
   ].filter(n => n.show);
 }
@@ -413,6 +432,7 @@ function renderMain() {
     case 'staff':     content = can('console.staff') ? renderStaff() : denied(); break;
     case 'user':      content = can('console.staff') ? renderUserProfile(getRouteArg()) : denied(); break;
     case 'roles':     content = can('console.staff') ? renderRoles() : denied(); break;
+    case 'payments':  content = can('console.settings') ? renderPayments() : denied(); break;
     case 'settings':  content = can('console.settings') ? renderSettings() : denied(); break;
     default:          content = denied();
   }
@@ -425,7 +445,7 @@ function navGroups() {
   const items = navItems();
   const has = k => items.some(n => n.key === k);
   const pick = keys => items.filter(n => keys.includes(n.key));
-  const MANAGE = ['branches', 'staff', 'roles', 'devices', 'settings'];
+  const MANAGE = ['branches', 'staff', 'roles', 'devices', 'payments', 'settings'];
   return {
     main: pick(['dashboard', 'pos', 'orders', 'reports', 'menu']),
     manage: pick(MANAGE),
@@ -1131,10 +1151,8 @@ function openCheckoutModal() {
       </div>
       <div class="grid grid-cols-3 gap-2">
         <button onclick="checkoutSetMethod('cash')" id="pay-cash" class="btn btn-ghost !py-3">Cash</button>
-        <button onclick="checkoutSetMethod('mada')" id="pay-mada" class="btn btn-ghost !py-3">mada</button>
+        ${activePayMethods().map(p => `<button onclick="checkoutSetMethod('${escapeHTML(p.code)}')" id="pay-${escapeHTML(p.code)}" class="btn btn-ghost !py-3">${escapeHTML(p.name)}</button>`).join('')}
         <button onclick="checkoutSetMethod('split')" id="pay-split" class="btn btn-ghost !py-3">Split</button>
-        <button onclick="checkoutSetMethod('keeta')" id="pay-keeta" class="btn btn-ghost !py-3">KEETA</button>
-        <button onclick="checkoutSetMethod('ninja')" id="pay-ninja" class="btn btn-ghost !py-3">NINJA</button>
       </div>
       <div id="pay-detail"></div>
     </div>`;
@@ -1143,7 +1161,7 @@ function openCheckoutModal() {
 }
 function checkoutSetMethod(m) {
   _checkoutSplit = { method: m };
-  ['cash','mada','split','keeta','ninja'].forEach(x => {
+  ['cash', 'split', ...activePayMethods().map(p => p.code)].forEach(x => {
     const b = $('#pay-' + x); if (!b) return;
     b.classList.toggle('btn-primary', x === m);
     b.classList.toggle('btn-ghost', x !== m);
@@ -1155,18 +1173,23 @@ function checkoutSetMethod(m) {
       <label class="label">Cash received</label>
       <input id="cash-tendered" type="number" min="0" step="0.05" class="input !text-lg" value="${t.total.toFixed(2)}" oninput="updateChange()">
       <div id="cash-change" class="text-sm text-slate-600 mt-2 font-semibold">Change: 0.00</div>`;
-  } else if (m === 'mada') {
-    d.innerHTML = `<div class="bg-slate-50 rounded-xl p-3 text-sm text-slate-600">Process ${fmtMoney(t.total)} on the mada terminal, then complete the order. Card details never enter the POS.</div>`;
-  } else if (m === 'keeta' || m === 'ninja') {
-    d.innerHTML = `<div class="bg-slate-50 rounded-xl p-3 text-sm text-slate-600">Settles ${fmtMoney(t.total)} to the ${m === 'keeta' ? 'KEETA' : 'NINJA'} tender — the aggregator pays it out later; no cash enters the drawer.</div>`;
-  } else {
+  } else if (m === 'split') {
     d.innerHTML = `
       <div class="grid grid-cols-2 gap-3">
         <div><label class="label">Cash part</label><input id="split-cash" type="number" min="0" step="0.05" class="input" value="0" oninput="updateSplit()"></div>
-        <div><label class="label">mada part</label><input id="split-mada" type="number" min="0" step="0.05" class="input" value="${t.total.toFixed(2)}" oninput="updateSplit()"></div>
+        <div>
+          <label class="label">Other part</label>
+          <input id="split-other" type="number" min="0" step="0.05" class="input" value="${t.total.toFixed(2)}" oninput="updateSplit()">
+          <select id="split-method" class="input mt-2">
+            ${activePayMethods().map(p => `<option value="${escapeHTML(p.code)}">${escapeHTML(p.name)}</option>`).join('')}
+          </select>
+        </div>
       </div>
       <div id="split-check" class="text-sm mt-2 font-semibold"></div>`;
     updateSplit();
+  } else {
+    const pm = activePayMethods().find(p => p.code === m);
+    d.innerHTML = `<div class="bg-slate-50 rounded-xl p-3 text-sm text-slate-600">Settle ${fmtMoney(t.total)} to <strong>${escapeHTML(pm?.name || m)}</strong> — processed outside the POS; no cash enters the drawer. Card or account details never enter the POS.</div>`;
   }
 }
 function updateChange() {
@@ -1178,9 +1201,9 @@ function updateChange() {
 function updateSplit() {
   const t = cartTotals();
   const cash = parseFloat($('#split-cash')?.value) || 0;
-  const mada = parseFloat($('#split-mada')?.value) || 0;
+  const other = parseFloat($('#split-other')?.value) || 0;
   const el = $('#split-check'); if (!el) return;
-  const diff = t.total - cash - mada;
+  const diff = t.total - cash - other;
   el.textContent = Math.abs(diff) < 0.005 ? '✓ Adds up' : (diff > 0 ? `${fmtMoney(diff)} short` : `${fmtMoney(-diff)} over`);
   el.style.color = Math.abs(diff) < 0.005 ? '#047857' : '#b91c1c';
 }
@@ -1193,15 +1216,16 @@ async function saveOrder() {
     const tendered = parseFloat($('#cash-tendered')?.value) || 0;
     if (tendered < t.total - 0.005) { toast('Cash received is less than the total', 'error'); return false; }
     payments = [{ method:'cash', amount: t.total, tendered, change_given: Math.max(0, tendered - t.total) }];
-  } else if (m === 'mada' || m === 'keeta' || m === 'ninja') {
+  } else if (m !== 'split') {
     payments = [{ method: m, amount: t.total }];
   } else {
     const cash = parseFloat($('#split-cash')?.value) || 0;
-    const mada = parseFloat($('#split-mada')?.value) || 0;
-    if (Math.abs(cash + mada - t.total) > 0.005) { toast('Split amounts must add up to the total', 'error'); return false; }
+    const other = parseFloat($('#split-other')?.value) || 0;
+    const otherMethod = $('#split-method')?.value || 'mada';
+    if (Math.abs(cash + other - t.total) > 0.005) { toast('Split amounts must add up to the total', 'error'); return false; }
     payments = [];
     if (cash > 0) payments.push({ method:'cash', amount: cash });
-    if (mada > 0) payments.push({ method:'mada', amount: mada });
+    if (other > 0) payments.push({ method: otherMethod, amount: other });
   }
   const branchId = posBranchId();
   const me = currentStaff();
@@ -1357,7 +1381,6 @@ async function printReceipt(orderId, mode = 'customer') {
   const detail = await loadOrderDetail(orderId);
   const s = state.settings;
   const qrUrl = zatcaQrDataUrl(order);
-  const payLabel = { cash:'Cash', mada:'mada', card:'Card', stc_pay:'STC Pay', keeta:'KEETA', ninja:'NINJA', koinz:'Koinz', other:'Other' };
   const isReprint = mode !== 'both'; // checkout = first print; Orders reprint = 'customer'/'bar'
   const productsCount = detail.items.reduce((n, l) => n + l.qty, 0);
   const custStatusBanner = order.status === 'void' ? '<div class="c b" style="font-size:13px">*** VOID / ملغى ***</div>'
@@ -1393,7 +1416,7 @@ async function printReceipt(orderId, mode = 'customer') {
     <div class="row2"><div><span class="b">VAT(${s.vatRate}%)</span><div class="ar">الضريبة</div></div><span>${fmtMoney(order.vatAmount)}</span></div>
     <hr>
     <div class="row2"><div><span class="b" style="font-size:13px">Total</span><div class="ar">الإجمالي</div></div><span class="b" style="font-size:13px">${fmtMoney(order.total)}</span></div>
-    ${detail.payments.map(p => { const lab = payLabel[p.method] || p.method; return `
+    ${detail.payments.map(p => { const lab = payMethodLabel(p.method); return `
     <div class="row2"><div><span class="b">Payment - ${lab}</span><div class="ar">الدفع - ${lab}</div></div><span>${fmtMoney(p.amount)}</span></div>
     ${p.method==='cash' && p.tendered != null ? `<div class="row2"><div><span>Tendered / Change</span></div><span>${fmtMoney(p.tendered)} / ${fmtMoney(p.changeGiven || 0)}</span></div>` : ''}`; }).join('')}
     <hr>
@@ -1712,7 +1735,6 @@ function reportProductsMix(data) {
 function reportPayments(data) {
   const doneIds = new Set(reportDone(data).map(o=>o.id));
   const pays = data.payments.filter(p => doneIds.has(p.orderId));
-  const label = { cash:'Cash', mada:'mada', card:'Card', stc_pay:'STC Pay', keeta:'KEETA', ninja:'NINJA', koinz:'Koinz', other:'Other' };
   const byMethod = {}; pays.forEach(p => { byMethod[p.method]=(byMethod[p.method]||{amt:0,n:0}); byMethod[p.method].amt+=p.amount; byMethod[p.method].n++; });
   const rows = Object.entries(byMethod).sort((a,b)=>b[1].amt-a[1].amt);
   const total = rows.reduce((s,[,v])=>s+v.amt,0);
@@ -1723,7 +1745,7 @@ function reportPayments(data) {
       <table class="w-full text-sm">
         <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100"><th class="text-start px-5 py-2">Method</th><th class="text-end px-3 py-2">Count</th><th class="text-end px-3 py-2">Share</th><th class="text-end px-5 py-2">Amount</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
-          ${rows.map(([m,v])=>`<tr><td class="px-5 py-2.5 font-medium">${label[m]||m}</td><td class="px-3 py-2.5 text-end text-slate-500">${v.n}</td><td class="px-3 py-2.5 text-end text-slate-500">${total?Math.round(v.amt/total*100):0}%</td><td class="px-5 py-2.5 text-end font-semibold tabular-nums">${fmtMoney(v.amt)}</td></tr>`).join('')||'<tr><td colspan="4" class="px-5 py-6 text-center text-slate-400">No payments in this range.</td></tr>'}
+          ${rows.map(([m,v])=>`<tr><td class="px-5 py-2.5 font-medium">${escapeHTML(payMethodLabel(m))}</td><td class="px-3 py-2.5 text-end text-slate-500">${v.n}</td><td class="px-3 py-2.5 text-end text-slate-500">${total?Math.round(v.amt/total*100):0}%</td><td class="px-5 py-2.5 text-end font-semibold tabular-nums">${fmtMoney(v.amt)}</td></tr>`).join('')||'<tr><td colspan="4" class="px-5 py-6 text-center text-slate-400">No payments in this range.</td></tr>'}
         </tbody></table>
     </div>`;
 }
@@ -2352,6 +2374,48 @@ function openBranchModal(id) {
     const row = { name: $('#br-name').value.trim().toUpperCase(), name_ar: $('#br-ar').value.trim(), active: $('#br-active').value === '1' };
     if (!row.name) { toast('Name required', 'error'); return false; }
     const q = editing ? sb.from('branches').update(row).eq('id', editing.id) : sb.from('branches').insert(row);
+    const { error } = await q;
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    await loadAll(); render(); toast('Saved', 'success');
+  });
+}
+function renderPayments() {
+  return `
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="font-display text-2xl font-semibold text-slate-900">Payment Methods</h2>
+      <button onclick="openPayMethodModal(null)" class="btn btn-primary">+ Payment method</button>
+    </div>
+    <div class="bg-white rounded-2xl shadow-card divide-y divide-slate-100">
+      ${(state.payMethods || []).map(p => `
+        <div class="px-5 py-3 flex items-center gap-3 ${p.active ? '' : 'opacity-50'}">
+          <div class="flex-1 font-medium">${escapeHTML(p.name)} <span class="text-slate-400 text-xs font-normal">${escapeHTML(p.code)}</span> ${p.active ? '' : '<span class="badge badge-slate">Inactive</span>'}</div>
+          <button onclick="openPayMethodModal('${p.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
+        </div>`).join('') || '<div class="px-5 py-8 text-center text-sm text-slate-400">No payment methods yet — run SQL block 17, then add them here.</div>'}
+    </div>
+    <p class="text-xs text-slate-500 mt-3"><strong>Cash</strong> and <strong>Split</strong> are built into the checkout — the methods here are the external tenders next to them (card terminals, aggregators, wallets). Deactivate a method to hide it from checkout without losing its history in reports.</p>`;
+}
+function openPayMethodModal(id) {
+  const editing = id ? (state.payMethods || []).find(p => p.id === id) : null;
+  openModal(editing ? 'Edit payment method' : 'New payment method', `
+    <div class="space-y-3">
+      <div><label class="label">Name (shown at checkout & on receipts)</label><input id="pm-name" class="input" value="${escapeHTML(editing?.name || '')}" placeholder="e.g. STC Pay"></div>
+      ${editing ? `
+      <div><label class="label">Code</label><input class="input" value="${escapeHTML(editing.code)}" disabled>
+        <p class="text-xs text-slate-400 mt-1">The code is stored on past orders, so it can't change — rename freely instead.</p></div>` : ''}
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Sort</label><input id="pm-sort" type="number" class="input" value="${editing?.sort ?? ((state.payMethods || []).length + 1)}"></div>
+        <div><label class="label">Active</label><select id="pm-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+      </div>
+    </div>`, async () => {
+    const name = $('#pm-name').value.trim();
+    if (!name) { toast('Name required', 'error'); return false; }
+    const row = { name, active: $('#pm-active').value === '1', sort_order: parseInt($('#pm-sort').value) || 0 };
+    if (!editing) {
+      row.code = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      if (!row.code) { toast('Name must contain letters or numbers', 'error'); return false; }
+      if ((state.payMethods || []).some(p => p.code === row.code)) { toast('A method with this code already exists', 'error'); return false; }
+    }
+    const q = editing ? sb.from('payment_methods').update(row).eq('id', editing.id) : sb.from('payment_methods').insert(row);
     const { error } = await q;
     if (error) { toast(humanizeError(error), 'error'); return false; }
     await loadAll(); render(); toast('Saved', 'success');

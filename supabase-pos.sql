@@ -957,6 +957,48 @@ ALTER TABLE public.staff ADD COLUMN IF NOT EXISTS employee_number text;
 ALTER TABLE public.staff ADD COLUMN IF NOT EXISTS phone           text;
 
 -- =============================================================
+-- 17. PAYMENT METHODS
+--     Foodics-style manageable tenders. Cash and Split stay built
+--     into the app (they carry drawer / change / split logic); the
+--     rows here are the external tenders shown at checkout. The
+--     seeds keep the codes existing order_payments already use.
+--     code is the stable key stored on payments; name is the label.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS public.payment_methods (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       text NOT NULL,
+  code       text NOT NULL UNIQUE,
+  active     boolean NOT NULL DEFAULT true,
+  sort_order integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.payment_methods ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "payment_methods_select_authenticated" ON public.payment_methods;
+DROP POLICY IF EXISTS "payment_methods_insert_admin"         ON public.payment_methods;
+DROP POLICY IF EXISTS "payment_methods_update_admin"         ON public.payment_methods;
+DROP POLICY IF EXISTS "payment_methods_delete_admin"         ON public.payment_methods;
+CREATE POLICY "payment_methods_select_authenticated"
+  ON public.payment_methods FOR SELECT TO authenticated USING (true);
+CREATE POLICY "payment_methods_insert_admin"
+  ON public.payment_methods FOR INSERT TO authenticated WITH CHECK (public.is_admin());
+CREATE POLICY "payment_methods_update_admin"
+  ON public.payment_methods FOR UPDATE TO authenticated
+  USING (public.is_admin()) WITH CHECK (public.is_admin());
+CREATE POLICY "payment_methods_delete_admin"
+  ON public.payment_methods FOR DELETE TO authenticated USING (public.is_admin());
+
+INSERT INTO public.payment_methods (name, code, sort_order)
+SELECT 'mada', 'mada', 1
+WHERE NOT EXISTS (SELECT 1 FROM public.payment_methods WHERE code = 'mada');
+INSERT INTO public.payment_methods (name, code, sort_order)
+SELECT 'KEETA', 'keeta', 2
+WHERE NOT EXISTS (SELECT 1 FROM public.payment_methods WHERE code = 'keeta');
+INSERT INTO public.payment_methods (name, code, sort_order)
+SELECT 'NINJA', 'ninja', 3
+WHERE NOT EXISTS (SELECT 1 FROM public.payment_methods WHERE code = 'ninja');
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
