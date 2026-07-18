@@ -265,9 +265,17 @@ async function doSignup() {
   const firstName = $('#su-first').value.trim();
   const lastName = $('#su-last').value.trim();
   if (!email || password.length < 6) { toast('Email and a 6+ character password required', 'error'); return; }
-  const { error } = await sb.auth.signUp({ email, password, options: { data: { first_name: firstName, last_name: lastName } } });
+  // Explicit redirect back to THIS app. Supabase truncates the project's
+  // Site URL to its bare origin for the confirmation flow, which drops the
+  // /hassad-pos/ path and 404s on GitHub Pages (the HR app hit this twice).
+  // origin + pathname survives a future custom-domain switch too.
+  const appUrl = window.location.origin + window.location.pathname;
+  const { error } = await sb.auth.signUp({
+    email, password,
+    options: { data: { first_name: firstName, last_name: lastName }, emailRedirectTo: appUrl },
+  });
   if (error) { toast(error.message, 'error'); return; }
-  toast('Account created — you can log in now.', 'success');
+  toast('Account created. If a confirmation email arrives, click the link, then log in.', 'success');
   authMode = 'login'; render();
 }
 async function afterAuth(user) {
