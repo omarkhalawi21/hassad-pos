@@ -852,6 +852,85 @@ CREATE POLICY "device_categories_delete_roles"
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS terminal text;
 
 -- =============================================================
+-- 14. ACCESS CONTROL: console/app switches + named roles
+--     Mirrors the Foodics Users screen: every staff member has two
+--     INDEPENDENT switches -- console_access (back office) and
+--     app_access (POS console) -- plus any number of named roles that
+--     carry granular permissions. Their own users show why both are
+--     needed: an operations person with console but no POS, branch
+--     accounts with POS but no console, a supervisor with both.
+--
+--     IMPORTANT: staff.role (admin/manager/cashier) stays the DATA
+--     authority -- it is what ~40 RLS policies enforce. The switches
+--     and permissions decide which SCREENS a person sees within that
+--     authority. Admins bypass permission checks entirely so nobody
+--     can lock themselves out.
+-- =============================================================
+ALTER TABLE public.staff ADD COLUMN IF NOT EXISTS console_access boolean not null default false;
+ALTER TABLE public.staff ADD COLUMN IF NOT EXISTS app_access     boolean not null default true;
+
+-- Backfill from the existing role so nothing changes for current users.
+UPDATE public.staff SET console_access = true  WHERE role IN ('admin','manager') AND console_access = false;
+UPDATE public.staff SET app_access     = true  WHERE app_access IS NOT TRUE;
+
+CREATE TABLE IF NOT EXISTS public.pos_roles (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null unique,
+  permissions text[] not null default '{}',
+  created_at  timestamptz not null default now()
+);
+CREATE TABLE IF NOT EXISTS public.staff_roles (
+  staff_id uuid not null references public.staff(id) on delete cascade,
+  role_id  uuid not null references public.pos_roles(id) on delete cascade,
+  PRIMARY KEY (staff_id, role_id)
+);
+
+-- Starter roles. Permission keys are the app's section/action names:
+--   console.dashboard | console.reports | console.menu | console.branches
+--   console.staff | console.devices | console.settings
+--   pos.discount | pos.void | pos.return | pos.drawer | pos.close_till
+INSERT INTO public.pos_roles (name, permissions)
+SELECT v.n, v.p::text[] FROM (VALUES
+  ('Cashier',          '{pos.discount,pos.drawer,pos.close_till}'),
+  ('Shift Supervisor', '{pos.discount,pos.void,pos.return,pos.drawer,pos.close_till}'),
+  ('Menu Manager',     '{console.menu}'),
+  ('Accountant',       '{console.dashboard,console.reports}'),
+  ('Operations',       '{console.dashboard,console.reports,console.menu,console.branches,console.devices}')
+) AS v(n, p)
+WHERE NOT EXISTS (SELECT 1 FROM public.pos_roles r WHERE r.name = v.n);
+
+ALTER TABLE public.pos_roles   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.staff_roles ENABLE ROW LEVEL SECURITY;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT schemaname, tablename, policyname FROM pg_policies
+           WHERE schemaname='public' AND tablename IN ('pos_roles','staff_roles') LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I', r.policyname, r.schemaname, r.tablename);
+  END LOOP;
+END $$;
+-- Everyone signed in reads roles (the app needs its own permissions);
+-- only admins create or change them.
+CREATE POLICY "pos_roles_select_authenticated"
+  ON public.pos_roles FOR SELECT TO authenticated USING (true);
+CREATE POLICY "pos_roles_insert_admin"
+  ON public.pos_roles FOR INSERT TO authenticated WITH CHECK (public.is_admin());
+CREATE POLICY "pos_roles_update_admin"
+  ON public.pos_roles FOR UPDATE TO authenticated
+  USING (public.is_admin()) WITH CHECK (public.is_admin());
+CREATE POLICY "pos_roles_delete_admin"
+  ON public.pos_roles FOR DELETE TO authenticated USING (public.is_admin());
+CREATE POLICY "staff_roles_select_authenticated"
+  ON public.staff_roles FOR SELECT TO authenticated USING (true);
+CREATE POLICY "staff_roles_insert_admin"
+  ON public.staff_roles FOR INSERT TO authenticated WITH CHECK (public.is_admin());
+CREATE POLICY "staff_roles_update_admin"
+  ON public.staff_roles FOR UPDATE TO authenticated
+  USING (public.is_admin()) WITH CHECK (public.is_admin());
+CREATE POLICY "staff_roles_delete_admin"
+  ON public.staff_roles FOR DELETE TO authenticated USING (public.is_admin());
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that

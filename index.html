@@ -102,6 +102,7 @@ function emptyState() {
     modGroups: [], modOptions: [], itemModGroups: [],  // [{itemId, groupId, minSelect, maxSelect}]
     menuGroups: [], itemMenuGroups: [],                // channel menus (Koinz Menu, Taker)
     devices: [], deviceCategories: [],                 // printers per branch + kitchen category filter
+    posRoles: [], staffRoles: [],                      // named roles + [{staffId, roleId}] assignments
     reportCache: {},                                   // key "from|to|branch" → { orders, items, payments, shifts, movements }
     orders: [],           // capped recent window (today + last 7 days)
     shifts: [],           // open shifts + last 7 days of closed ones
@@ -119,8 +120,26 @@ function mapSettingsFromDb(r) {
 function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active }; }
 function mapStaffFromDb(r) {
   return { id: r.id, userId: r.user_id, email: r.email || '', firstName: r.first_name || '', lastName: r.last_name || '',
-    role: r.role || 'cashier', branchId: r.branch_id, active: !!r.active };
+    role: r.role || 'cashier', branchId: r.branch_id, active: !!r.active,
+    consoleAccess: !!r.console_access, appAccess: r.app_access !== false };
 }
+// Permission catalog — the keys roles can grant. `role` (admin/manager/
+// cashier) remains the DATA authority enforced by RLS; these decide which
+// screens and actions a person sees within it.
+const PERMISSIONS = [
+  ['console.dashboard', 'Dashboard',        'console'],
+  ['console.reports',   'Reports',          'console'],
+  ['console.menu',      'Menu management',  'console'],
+  ['console.branches',  'Branches',         'console'],
+  ['console.staff',     'Staff & Roles',    'console'],
+  ['console.devices',   'Devices',          'console'],
+  ['console.settings',  'Settings',         'console'],
+  ['pos.discount',      'Apply discounts',  'pos'],
+  ['pos.void',          'Void orders',      'pos'],
+  ['pos.return',        'Return orders',    'pos'],
+  ['pos.drawer',        'Drawer operations','pos'],
+  ['pos.close_till',    'Close the till',   'pos'],
+];
 function mapCategoryFromDb(r) { return { id: r.id, nameEn: r.name_en || '', nameAr: r.name_ar || '', reference: r.reference || '', sortOrder: Number(r.sort_order) || 0, active: !!r.active }; }
 function mapItemFromDb(r) {
   return { id: r.id, categoryId: r.category_id, nameEn: r.name_en || '', nameAr: r.name_ar || '',
@@ -182,6 +201,30 @@ function currentStaff() {
 function currentRole() { return currentStaff()?.role || 'none'; }
 function hasRole(...roles) { return roles.includes(currentRole()); }
 function isAdmin() { return currentRole() === 'admin'; }
+// Permissions granted by every role assigned to a staff member.
+function staffPermissions(staffId) {
+  const roleIds = state.staffRoles.filter(x => x.staffId === staffId).map(x => x.roleId);
+  const set = new Set();
+  state.posRoles.filter(r => roleIds.includes(r.id)).forEach(r => r.permissions.forEach(p => set.add(p)));
+  return set;
+}
+function staffRoleNames(staffId) {
+  const roleIds = state.staffRoles.filter(x => x.staffId === staffId).map(x => x.roleId);
+  return state.posRoles.filter(r => roleIds.includes(r.id)).map(r => r.name);
+}
+// can(): the model is "switches decide WHERE, roles decide WHAT".
+// Only admins bypass — nobody else gets implicit permissions, so a role
+// with two boxes ticked really does mean only those two.
+function can(perm) {
+  if (isAdmin()) return true;
+  const me = currentStaff(); if (!me) return false;
+  // Back-office permissions require the Back office switch as well.
+  if (perm.startsWith('console.') && !me.consoleAccess) return false;
+  if (perm.startsWith('pos.') && !me.appAccess) return false;
+  return staffPermissions(me.id).has(perm);
+}
+function hasConsole() { return isAdmin() || (currentStaff()?.consoleAccess === true); }
+function hasApp()     { return isAdmin() || (currentStaff()?.appAccess !== false); }
 function myBranchId() { return currentStaff()?.branchId || null; }
 function branchName(id) { return state.branches.find(b => b.id === id)?.name || '—'; }
 function staffName(id) { const s = state.staff.find(x => x.id === id); return s ? `${s.firstName} ${s.lastName}`.trim() || s.email : '—'; }
@@ -189,7 +232,7 @@ function staffName(id) { const s = state.staff.find(x => x.id === id); return s 
 /* -------------------- DATA LOAD -------------------- */
 async function loadAll() {
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR, menuGroupsR, itemMenuGroupsR, devicesR, deviceCatsR] = await Promise.all([
+  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR, menuGroupsR, itemMenuGroupsR, devicesR, deviceCatsR, posRolesR, staffRolesR] = await Promise.all([
     sb.from('pos_settings').select('*').limit(1).maybeSingle(),
     sb.from('branches').select('*').order('name'),
     sb.from('staff').select('*').order('first_name'),
@@ -215,6 +258,8 @@ async function loadAll() {
     sb.from('item_menu_groups').select('*'),
     sb.from('devices').select('*').order('name'),
     sb.from('device_categories').select('*'),
+    sb.from('pos_roles').select('*').order('name'),
+    sb.from('staff_roles').select('*'),
   ]);
   if (settingsR.data) { const s = mapSettingsFromDb(settingsR.data); state.settingsId = s._id; state.settings = s; }
   state.branches   = (branchesR.data   || []).map(mapBranchFromDb);
@@ -236,6 +281,8 @@ async function loadAll() {
     name: r.name || '', model: r.model || '', ip: r.ip || '', copies: Number(r.copies) || 1,
     orderTypes: Array.isArray(r.order_types) ? r.order_types : ['pickup','dine_in','delivery','drive_thru'], active: !!r.active }));
   state.deviceCategories = (deviceCatsR?.data || []).map(r => ({ deviceId: r.device_id, categoryId: r.category_id }));
+  state.posRoles   = (posRolesR?.data   || []).map(r => ({ id: r.id, name: r.name || '', permissions: Array.isArray(r.permissions) ? r.permissions : [] }));
+  state.staffRoles = (staffRolesR?.data || []).map(r => ({ staffId: r.staff_id, roleId: r.role_id }));
 }
 async function loadOrderDetail(orderId) {
   if (state.orderDetailCache[orderId]) return state.orderDetailCache[orderId];
@@ -281,7 +328,10 @@ async function doSignup() {
 async function afterAuth(user) {
   state.session = { userId: user.id, email: user.email, loggedAt: new Date().toISOString() };
   await loadAll();
-  location.hash = hasRole('cashier') ? '#/pos' : '#/dashboard';
+  // Land on the POS for counter staff, the back office for everyone else.
+  location.hash = hasApp() && !hasConsole() ? '#/pos'
+    : can('console.dashboard') ? '#/dashboard'
+    : hasApp() ? '#/pos' : '#/orders';
   render();
 }
 async function logout() {
@@ -297,7 +347,7 @@ async function logout() {
 }
 
 /* -------------------- ROUTING / SHELL -------------------- */
-const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'reports', 'branches', 'staff', 'devices', 'display', 'settings'];
+const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'reports', 'branches', 'staff', 'roles', 'devices', 'display', 'settings'];
 let authMode = 'login';
 function getRoute() {
   const h = (location.hash || '').replace(/^#\/?/, '').split('/')[0];
@@ -310,14 +360,15 @@ window.addEventListener('hashchange', () => render());
 
 function navItems() {
   return [
-    { key:'dashboard', label:'Dashboard', show: hasRole('admin','manager') },
-    { key:'pos',       label:'POS',       show: true },
-    { key:'orders',    label:'Orders',    show: true },
-    { key:'reports',   label:'Reports',   show: hasRole('admin','manager') },
-    { key:'menu',      label:'Menu',      show: hasRole('admin','manager') },
-    { key:'branches',  label:'Branches',  show: isAdmin() },
-    { key:'staff',     label:'Staff',     show: isAdmin() },
-    { key:'settings',  label:'Settings',  show: isAdmin() },
+    { key:'dashboard', label:'Dashboard', show: can('console.dashboard') },
+    { key:'pos',       label:'POS',       show: hasApp() },
+    { key:'orders',    label:'Orders',    show: hasApp() || hasConsole() },
+    { key:'reports',   label:'Reports',   show: can('console.reports') },
+    { key:'menu',      label:'Menu',      show: can('console.menu') },
+    { key:'branches',  label:'Branches',  show: can('console.branches') },
+    { key:'staff',     label:'Staff',     show: can('console.staff') },
+    { key:'roles',     label:'Roles',     show: can('console.staff') },
+    { key:'settings',  label:'Settings',  show: can('console.settings') },
   ].filter(n => n.show);
 }
 
@@ -345,18 +396,22 @@ function renderMain() {
   }
   const route = getRoute();
   let content = '';
+  // Every route re-checks access; a blocked route falls back to whatever
+  // this person CAN reach (POS if they have it, else their landing page).
+  const denied = () => hasApp() ? renderPos() : renderNoSectionGate();
   switch (route) {
-    case 'pos':       content = renderPos(); break;
-    case 'orders':    content = renderOrders(); break;
-    case 'dashboard': content = hasRole('admin','manager') ? renderDashboard() : renderPos(); break;
-    case 'menu':      content = hasRole('admin','manager') ? renderMenu() : renderPos(); break;
-    case 'item':      content = hasRole('admin','manager') ? renderItemProfile(getRouteArg()) : renderPos(); break;
-    case 'reports':   content = hasRole('admin','manager') ? renderReports() : renderPos(); break;
-    case 'branches':  content = isAdmin() ? renderBranches() : renderPos(); break;
-    case 'devices':   content = renderDevices(); break; // POS-side page: cashiers view their branch, managers edit
-    case 'staff':     content = isAdmin() ? renderStaff() : renderPos(); break;
-    case 'settings':  content = isAdmin() ? renderSettings() : renderPos(); break;
-    default:          content = renderPos();
+    case 'pos':       content = hasApp() ? renderPos() : renderNoSectionGate(); break;
+    case 'orders':    content = (hasApp() || hasConsole()) ? renderOrders() : renderNoSectionGate(); break;
+    case 'dashboard': content = can('console.dashboard') ? renderDashboard() : denied(); break;
+    case 'menu':      content = can('console.menu') ? renderMenu() : denied(); break;
+    case 'item':      content = can('console.menu') ? renderItemProfile(getRouteArg()) : denied(); break;
+    case 'reports':   content = can('console.reports') ? renderReports() : denied(); break;
+    case 'branches':  content = can('console.branches') ? renderBranches() : denied(); break;
+    case 'devices':   content = (hasApp() || can('console.devices')) ? renderDevices() : denied(); break;
+    case 'staff':     content = can('console.staff') ? renderStaff() : denied(); break;
+    case 'roles':     content = can('console.staff') ? renderRoles() : denied(); break;
+    case 'settings':  content = can('console.settings') ? renderSettings() : denied(); break;
+    default:          content = denied();
   }
   app.innerHTML = renderShell(content, route);
 }
@@ -407,6 +462,13 @@ function renderLogin() {
         </form>
         <button onclick="authMode='signup'; render();" class="btn btn-ghost w-full mt-3">First time? Create account</button>`}
       </div>
+    </div>`;
+}
+function renderNoSectionGate() {
+  return `
+    <div class="bg-white rounded-2xl shadow-card p-10 text-center max-w-md mx-auto mt-8">
+      <h2 class="font-display text-xl font-semibold text-slate-900">Not available to you</h2>
+      <p class="text-sm text-slate-500 mt-2">Your account doesn't have access to this section. Ask an admin to grant it under Staff &rarr; your account, or assign you a role that includes it.</p>
     </div>`;
 }
 function renderNoAccessGate() {
@@ -650,9 +712,9 @@ function renderPos() {
       <span class="badge badge-green">Till open</span>
       <span class="text-slate-500">since ${fmtDateTime(shift.openedAt)} · float ${fmtMoney(shift.openingFloat)} · ${escapeHTML(staffName(shift.openedBy))}</span>
       <div class="ms-auto flex gap-1.5">
-        <button onclick="openDrawerModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Drawer</button>
+        ${can('pos.drawer') ? `<button onclick="openDrawerModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Drawer</button>` : ''}
         <button onclick="location.hash='#/devices'" class="btn btn-ghost !py-1 !px-3 !text-xs">Devices</button>
-        <button onclick="openCloseTillModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Close till</button>
+        ${can('pos.close_till') ? `<button onclick="openCloseTillModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Close till</button>` : ''}
       </div>
     </div>
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -708,7 +770,7 @@ function renderPos() {
         ${posOrderNote ? `<div class="mt-2 text-xs bg-amber-50 border border-amber-100 rounded-lg px-2.5 py-1.5 text-amber-800">📝 ${escapeHTML(posOrderNote)}</div>` : ''}
         <div class="flex gap-2 mt-4">
           <button onclick="openOrderNoteModal()" class="btn btn-ghost !py-3 !px-3" title="Order note">📝</button>
-          <button onclick="openDiscountModal()" class="btn btn-ghost !py-3">${t.discount > 0 ? 'Edit discount' : 'Discount'}</button>
+          ${can('pos.discount') ? `<button onclick="openDiscountModal()" class="btn btn-ghost !py-3">${t.discount > 0 ? 'Edit discount' : 'Discount'}</button>` : ''}
           <button onclick="openCheckoutModal()" class="btn btn-primary flex-1 !py-3 !text-base">Charge ${fmtMoney(t.total)}</button>
         </div>`}
       </div>
@@ -1165,8 +1227,8 @@ function renderOrders() {
                 <button onclick="printReceipt('${o.id}','customer')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Receipt</button>
                 <button onclick="printReceipt('${o.id}','bar')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Bar</button>
                 ${hasRole('admin','manager') && o.status==='completed' ? `
-                <button onclick="returnOrder('${o.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Return</button>
-                <button onclick="voidOrder('${o.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Void</button>` : ''}
+                ${can('pos.return') ? `<button onclick="returnOrder('${o.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Return</button>` : ''}
+                ${can('pos.void') ? `<button onclick="voidOrder('${o.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Void</button>` : ''}` : ''}
               </td>
             </tr>`).join('') || '<tr><td colspan="8" class="text-center text-slate-400 py-10">No orders yet.</td></tr>'}
         </tbody></table></div>
@@ -2257,20 +2319,27 @@ function renderStaff() {
       <table class="w-full text-sm">
         <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
           <th class="text-start px-4 py-2.5">Name</th><th class="text-start px-4 py-2.5">Email</th><th class="text-start px-4 py-2.5">Role</th>
+          <th class="text-start px-4 py-2.5">Back office</th><th class="text-start px-4 py-2.5">POS</th><th class="text-start px-4 py-2.5">Roles</th>
           <th class="text-start px-4 py-2.5">Branch</th><th class="text-start px-4 py-2.5">Login</th><th class="px-4 py-2.5"></th></tr></thead>
         <tbody class="divide-y divide-slate-100">
-          ${state.staff.map(s => `
+          ${state.staff.map(s => {
+            const names = staffRoleNames(s.id);
+            return `
             <tr class="${s.active ? '' : 'opacity-50'}">
               <td class="px-4 py-2.5 font-medium">${escapeHTML((s.firstName + ' ' + s.lastName).trim() || '—')}</td>
               <td class="px-4 py-2.5 text-slate-600">${escapeHTML(s.email)}</td>
               <td class="px-4 py-2.5"><span class="badge badge-slate">${escapeHTML(s.role)}</span></td>
+              <td class="px-4 py-2.5">${s.consoleAccess || s.role === 'admin' ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Off</span>'}</td>
+              <td class="px-4 py-2.5">${s.appAccess ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Off</span>'}</td>
+              <td class="px-4 py-2.5">${names.length ? names.map(n => `<span class="badge badge-slate">${escapeHTML(n)}</span>`).join(' ') : '<span class="text-slate-400">—</span>'}</td>
               <td class="px-4 py-2.5">${escapeHTML(s.branchId ? branchName(s.branchId) : '—')}</td>
               <td class="px-4 py-2.5">${s.userId ? '<span class="badge badge-green">Linked</span>' : '<span class="badge badge-amber">Awaiting signup</span>'}</td>
               <td class="px-4 py-2.5 text-end"><button onclick="openStaffModal('${s.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button></td>
-            </tr>`).join('')}
+            </tr>`;
+          }).join('')}
         </tbody></table>
     </div>
-    <p class="text-xs text-slate-500 mt-3">Add a staff member here first, then have them use "Create account" on the login screen with the same email — it links automatically.</p>`;
+    <p class="text-xs text-slate-500 mt-3">Add a staff member here first, then have them use "Create account" on the login screen with the same email — it links automatically. <strong>Back office</strong> and <strong>POS</strong> are independent: someone can have one, both, or neither. Roles grant the specific sections and actions — manage them under <a href="#/roles" class="text-brand-700 hover:underline">Roles</a>.</p>`;
 }
 function openStaffModal(id) {
   const editing = id ? state.staff.find(s => s.id === id) : null;
@@ -2289,19 +2358,113 @@ function openStaffModal(id) {
           ${state.branches.filter(b => b.active).map(b => `<option value="${b.id}" ${editing?.branchId === b.id ? 'selected':''}>${escapeHTML(b.name)}</option>`).join('')}</select></div>
       </div>
       <div><label class="label">Active</label><select id="st-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+      <div class="border-t border-slate-100 pt-3">
+        <label class="label">Access</label>
+        <div class="flex gap-4 flex-wrap">
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="st-console" ${(editing ? editing.consoleAccess : false) ? 'checked' : ''}> <span><strong>Back office</strong> — dashboard, reports, menu, settings</span></label>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="st-app" ${(editing ? editing.appAccess : true) ? 'checked' : ''}> <span><strong>POS</strong> — the till console</span></label>
+        </div>
+        <div class="text-[10px] text-slate-500 mt-1">Independent — a person can have one, both, or neither. Admins always have both.</div>
+      </div>
+      <div>
+        <label class="label">Roles (grant specific sections &amp; actions)</label>
+        ${state.posRoles.length ? `<div class="flex gap-3 flex-wrap">
+          ${state.posRoles.map(r => `<label class="flex items-center gap-1.5 text-sm"><input type="checkbox" class="st-role-cb" value="${r.id}" ${editing && state.staffRoles.some(x => x.staffId === editing.id && x.roleId === r.id) ? 'checked' : ''}> ${escapeHTML(r.name)}</label>`).join('')}
+        </div>` : '<div class="text-xs text-slate-400">No roles defined yet — create them under Roles.</div>'}
+      </div>
       ${!editing ? '<div class="bg-amber-50 border border-amber-100 rounded-xl p-3 text-xs text-amber-800">Cashiers must have a branch — RLS blocks their orders otherwise.</div>' : ''}
     </div>`, async () => {
     const row = { first_name: $('#st-first').value.trim(), last_name: $('#st-last').value.trim(),
       email: $('#st-email').value.trim().toLowerCase(), role: $('#st-role').value,
-      branch_id: $('#st-branch').value || null, active: $('#st-active').value === '1' };
+      branch_id: $('#st-branch').value || null, active: $('#st-active').value === '1',
+      console_access: $('#st-console').checked, app_access: $('#st-app').checked };
     if (!row.email) { toast('Email required', 'error'); return false; }
     if (row.role === 'cashier' && !row.branch_id) { toast('Cashiers need a branch', 'error'); return false; }
+    if (!row.console_access && !row.app_access && row.role !== 'admin') { toast('Give them Back office, POS, or both — otherwise they cannot use the app', 'error'); return false; }
     if (editing?.userId) delete row.email; // linked accounts keep their email
-    const q = editing ? sb.from('staff').update(row).eq('id', editing.id) : sb.from('staff').insert(row);
+    const q = editing ? sb.from('staff').update(row).eq('id', editing.id).select().single()
+                      : sb.from('staff').insert(row).select().single();
+    const { data, error } = await q;
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    // Rewrite this person's role assignments.
+    const staffId = data.id;
+    const wanted = [...document.querySelectorAll('.st-role-cb:checked')].map(cb => cb.value);
+    await sb.from('staff_roles').delete().eq('staff_id', staffId);
+    if (wanted.length) {
+      const { error: rErr } = await sb.from('staff_roles').insert(wanted.map(rid => ({ staff_id: staffId, role_id: rid })));
+      if (rErr) { toast('Saved, but roles failed: ' + humanizeError(rErr), 'error'); }
+    }
+    await loadAll(); render(); toast('Saved', 'success');
+  });
+}
+
+/* -------------------- ROLES -------------------- */
+function renderRoles() {
+  return `
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="font-display text-2xl font-semibold text-slate-900">Roles</h2>
+      ${isAdmin() ? `<button onclick="openRoleModal(null)" class="btn btn-primary">+ Role</button>` : ''}
+    </div>
+    <div class="bg-white rounded-2xl shadow-card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
+          <th class="text-start px-4 py-2.5">Role</th><th class="text-start px-4 py-2.5">Grants</th>
+          <th class="text-start px-4 py-2.5">People</th><th class="px-4 py-2.5"></th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${state.posRoles.map(r => {
+            const people = state.staffRoles.filter(x => x.roleId === r.id).length;
+            const labels = r.permissions.map(p => (PERMISSIONS.find(x => x[0] === p) || [p, p])[1]);
+            return `
+            <tr>
+              <td class="px-4 py-2.5 font-medium">${escapeHTML(r.name)}</td>
+              <td class="px-4 py-2.5 text-slate-600">${labels.length ? labels.map(l => `<span class="badge badge-slate">${escapeHTML(l)}</span>`).join(' ') : '<span class="text-slate-400">POS only — no extra permissions</span>'}</td>
+              <td class="px-4 py-2.5">${people}</td>
+              <td class="px-4 py-2.5 text-end whitespace-nowrap">
+                ${isAdmin() ? `<button onclick="openRoleModal('${r.id}')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Edit</button>
+                <button onclick="deleteRole('${r.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Delete</button>` : ''}
+              </td>
+            </tr>`;
+          }).join('') || '<tr><td colspan="4" class="text-center text-slate-400 py-10">No roles yet.</td></tr>'}
+        </tbody></table>
+    </div>
+    <p class="text-xs text-slate-500 mt-3">A role is a bundle of permissions you assign to people under Staff. Someone can hold several. Admins always have everything, so they don't need a role.</p>`;
+}
+function openRoleModal(id) {
+  const editing = id ? state.posRoles.find(r => r.id === id) : null;
+  const group = (kind, title) => `
+    <div>
+      <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">${title}</div>
+      <div class="grid grid-cols-2 gap-1.5">
+        ${PERMISSIONS.filter(p => p[2] === kind).map(([key, label]) => `
+          <label class="flex items-center gap-1.5 text-sm"><input type="checkbox" class="rl-perm" value="${key}" ${editing?.permissions.includes(key) ? 'checked' : ''}> ${escapeHTML(label)}</label>`).join('')}
+      </div>
+    </div>`;
+  openModal(editing ? 'Edit role' : 'New role', `
+    <div class="space-y-4">
+      <div><label class="label">Role name</label><input id="rl-name" class="input" value="${escapeHTML(editing?.name || '')}" placeholder="e.g. Branch Manager"></div>
+      ${group('console', 'Back office sections')}
+      ${group('pos', 'POS actions')}
+      <div class="text-xs text-slate-500">Back-office permissions only apply if the person also has the <strong>Back office</strong> switch on their staff record.</div>
+    </div>`, async () => {
+    const name = $('#rl-name').value.trim();
+    if (!name) { toast('Name required', 'error'); return false; }
+    const perms = [...document.querySelectorAll('.rl-perm:checked')].map(cb => cb.value);
+    const row = { name, permissions: perms };
+    const q = editing ? sb.from('pos_roles').update(row).eq('id', editing.id) : sb.from('pos_roles').insert(row);
     const { error } = await q;
     if (error) { toast(humanizeError(error), 'error'); return false; }
     await loadAll(); render(); toast('Saved', 'success');
   });
+}
+function deleteRole(id) {
+  const r = state.posRoles.find(x => x.id === id); if (!r) return;
+  const people = state.staffRoles.filter(x => x.roleId === id).length;
+  openModal('Delete role', `<p class="text-sm text-slate-700">Delete <strong>${escapeHTML(r.name)}</strong>?${people ? ` ${people} person${people === 1 ? '' : 's'} currently hold${people === 1 ? 's' : ''} it and will lose those permissions.` : ''}</p>`,
+    async () => {
+      const { error } = await sb.from('pos_roles').delete().eq('id', id);
+      if (error) { toast(humanizeError(error), 'error'); return false; }
+      await loadAll(); render(); toast('Role deleted', 'success');
+    }, { saveLabel: 'Delete' });
 }
 function renderSettings() {
   const s = state.settings;
