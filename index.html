@@ -418,20 +418,59 @@ function renderMain() {
   app.innerHTML = renderShell(content, route);
 }
 
+// Nav grouped like Foodics: a short top-level set, plus a collapsible
+// "Manage" section for the admin/back-office pages so the header stays calm.
+function navGroups() {
+  const items = navItems();
+  const has = k => items.some(n => n.key === k);
+  const pick = keys => items.filter(n => keys.includes(n.key));
+  const MANAGE = ['branches', 'staff', 'roles', 'devices', 'settings'];
+  return {
+    main: pick(['dashboard', 'pos', 'orders', 'reports', 'menu']),
+    manage: pick(MANAGE),
+  };
+}
+let _navOpen = false;
+function toggleNav(force) { _navOpen = force === undefined ? !_navOpen : force; render(); }
 function renderShell(content, route) {
   const me = currentStaff();
-  const nav = navItems().map(n => `
-    <a href="#/${n.key}" class="px-3 py-2 rounded-xl text-sm font-semibold ${getRoute()===n.key ? 'bg-brand-700 text-white' : 'text-slate-600 hover:bg-brand-100'}">${escapeHTML(n.label)}</a>`).join('');
+  const g = navGroups();
+  const link = n => `
+    <a href="#/${n.key}" onclick="_navOpen=false" class="flex items-center px-3 py-2.5 rounded-xl text-sm font-semibold ${getRoute()===n.key ? 'bg-brand-700 text-white' : 'text-slate-700 hover:bg-brand-100'}">${escapeHTML(n.label)}</a>`;
+  const drawer = `
+    <div class="p-3 space-y-1">
+      ${g.main.map(link).join('')}
+      ${g.manage.length ? `
+        <div class="pt-3 mt-2 border-t border-brand-100">
+          <div class="px-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Manage</div>
+          ${g.manage.map(link).join('')}
+        </div>` : ''}
+    </div>`;
   return `
     <div class="min-h-screen flex flex-col">
-      <header class="bg-white border-b border-brand-100 px-4 py-2.5 flex items-center gap-3 flex-wrap">
+      <header class="bg-white border-b border-brand-100 px-4 py-2.5 flex items-center gap-3">
+        <button onclick="toggleNav()" aria-label="Menu" class="w-9 h-9 rounded-xl hover:bg-brand-100 flex flex-col items-center justify-center gap-1">
+          <span class="block h-0.5 bg-slate-700" style="width:18px"></span><span class="block h-0.5 bg-slate-700" style="width:18px"></span><span class="block h-0.5 bg-slate-700" style="width:18px"></span>
+        </button>
         <div class="font-display text-lg font-bold text-brand-800">Hassad <span class="text-brand-500">POS</span></div>
-        <nav class="flex gap-1 flex-wrap">${nav}</nav>
         <div class="ms-auto flex items-center gap-3 text-sm text-slate-500">
-          <span>${escapeHTML(me.firstName || me.email)}${me.branchId ? ` · ${escapeHTML(branchName(me.branchId))}` : ''} <span class="badge badge-slate">${escapeHTML(me.role)}</span></span>
+          <span class="hidden sm:inline">${escapeHTML(me.firstName || me.email)}${me.branchId ? ` · ${escapeHTML(branchName(me.branchId))}` : ''}</span>
           <button onclick="logout()" class="btn btn-ghost !py-1.5">Logout</button>
         </div>
       </header>
+      ${_navOpen ? `
+        <div onclick="toggleNav(false)" class="fixed inset-0 bg-slate-900/40 z-40"></div>
+        <aside class="fixed top-0 left-0 bottom-0 w-64 bg-white shadow-pop z-50 flex flex-col overflow-y-auto">
+          <div class="px-4 py-3 border-b border-brand-100 flex items-center justify-between">
+            <div class="font-display text-lg font-bold text-brand-800">Hassad <span class="text-brand-500">POS</span></div>
+            <button onclick="toggleNav(false)" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+          </div>
+          ${drawer}
+          <div class="mt-auto px-4 py-3 border-t border-brand-100 text-xs text-slate-500">
+            ${escapeHTML((me.firstName + ' ' + me.lastName).trim() || me.email)}<br>
+            <span class="badge badge-slate mt-1">${escapeHTML(me.role)}</span>${me.branchId ? ` <span class="badge badge-slate">${escapeHTML(branchName(me.branchId))}</span>` : ''}
+          </div>
+        </aside>` : ''}
       <main class="flex-1 p-4 md:p-6 max-w-7xl w-full mx-auto">${content}</main>
     </div>`;
 }
