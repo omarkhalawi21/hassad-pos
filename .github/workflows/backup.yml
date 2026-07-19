@@ -150,6 +150,15 @@ jobs:
             echo "::error::SUPABASE_DB_URL still contains the [YOUR-PASSWORD] placeholder. Replace it (brackets included) with the real database password."
             exit 1
           fi
+          # Enforce the EXACT expected shape before the value can reach
+          # pg_dump. A malformed URI (missing colon, doubled @) shifts
+          # the password into the host field, and pg_dump then prints
+          # that "host" verbatim into a public log — which happened on
+          # run #3 and forced a password rotation. Fail closed instead.
+          if ! printf '%s' "$CLEAN" | grep -Eq '^postgres(ql)?://postgres(\.[A-Za-z0-9]+)?:[^@ ]+@[A-Za-z0-9.-]+\.supabase\.(co|com):5432/postgres$'; then
+            echo "::error::SUPABASE_DB_URL parses as a URI but not the expected shape. Required: postgresql://postgres:PASSWORD@db.<ref>.supabase.co:5432/postgres — note the COLON between postgres and the password, exactly one @ before db., port 5432. If the password contains @ : / or # characters, percent-encode them or reset to a simpler one."
+            exit 1
+          fi
           echo "DB_URL_CLEAN=$CLEAN" >> "$GITHUB_ENV"
 
       - name: Compute timestamp
