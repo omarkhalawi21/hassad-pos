@@ -161,6 +161,14 @@ jobs:
             echo "::error::SUPABASE_DB_URL parses as a URI but not the expected shape (postgresql colon-slash-slash postgres COLON password AT db.<ref>.supabase.co COLON 5432 slash postgres). Diagnostics: at_signs=${AT_COUNT}, has_colon_after_user=$(case "$CLEAN" in postgres*://postgres:*|postgres*://postgres.*:*) echo yes;; *) echo no;; esac), has_port_5432=$(has :5432), ends_with_db_postgres=$(case "$CLEAN" in */postgres|*/postgres\?*) echo yes;; *) echo no;; esac), has_space=$(has ' '), has_question_mark=$(has '?'), length=${#CLEAN}"
             exit 1
           fi
+          # Every % in a URI must start a valid %XX hex escape. A bare %
+          # (e.g. someone writing % instead of %40 for @) makes libpq
+          # print the malformed token — password included — into a
+          # public log. Fail closed instead.
+          if printf '%s' "$CLEAN" | grep -q '%' && printf '%s' "$CLEAN" | grep -Eq '%([^0-9A-Fa-f]|[0-9A-Fa-f][^0-9A-Fa-f]|$)'; then
+            echo "::error::SUPABASE_DB_URL contains a percent sign that is not a valid %XX escape (e.g. use %40 for @, %3A for :, %2F for /, %23 for #). Fix the encoded password portion, or reset the DB password to plain letters and numbers."
+            exit 1
+          fi
           echo "DB_URL_CLEAN=$CLEAN" >> "$GITHUB_ENV"
 
       - name: Compute timestamp
