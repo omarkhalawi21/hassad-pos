@@ -124,6 +124,33 @@ jobs:
             echo "::error::SUPABASE_DB_URL appears to be the POOLED connection (port 6543). pg_dump needs the DIRECT connection on port 5432. Update the secret with the 'Direct connection' URI from Supabase → Project Settings → Database."
             exit 1
           fi
+          # Normalize common paste mistakes: the Supabase Connect panel
+          # offers a full terminal command (psql 'postgresql://...') and
+          # people copy that whole thing, or quotes / newlines ride along.
+          # pg_dump then treats the value as a database NAME and falls
+          # back to the local socket ("connection to server on socket
+          # /var/run/postgresql/... failed"), which is exactly what bit
+          # run #1 and #2 of this workflow.
+          CLEAN="$(printf '%s' "$DB_URL" | tr -d '\r\n')"
+          CLEAN="${CLEAN#psql }"
+          CLEAN="${CLEAN#\'}"; CLEAN="${CLEAN%\'}"
+          CLEAN="${CLEAN#\"}"; CLEAN="${CLEAN%\"}"
+          while [ "${CLEAN# }" != "$CLEAN" ]; do CLEAN="${CLEAN# }"; done
+          while [ "${CLEAN% }" != "$CLEAN" ]; do CLEAN="${CLEAN% }"; done
+          case "$CLEAN" in
+            postgresql://*|postgres://*) echo "Connection string shape OK." ;;
+            *)
+              # Print only yes/no facts — this repo is public, so never
+              # echo any fragment of the value itself.
+              has() { case "$CLEAN" in *"$1"*) echo yes;; *) echo no;; esac; }
+              echo "::error::SUPABASE_DB_URL is not a postgresql:// URI even after cleanup. Diagnostics: length=${#CLEAN}, contains_supabase_host=$(has supabase.co), contains_port_5432=$(has :5432), contains_space=$(has ' '), contains_placeholder_brackets=$(has '['). Re-copy ONLY the URI from Supabase Connect → Direct connection; it must start with postgresql://"
+              exit 1 ;;
+          esac
+          if echo "$CLEAN" | grep -q '\[YOUR-PASSWORD\]'; then
+            echo "::error::SUPABASE_DB_URL still contains the [YOUR-PASSWORD] placeholder. Replace it (brackets included) with the real database password."
+            exit 1
+          fi
+          echo "DB_URL_CLEAN=$CLEAN" >> "$GITHUB_ENV"
 
       - name: Compute timestamp
         id: ts
@@ -131,7 +158,7 @@ jobs:
 
       - name: Dump → gzip → encrypt
         env:
-          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DB_URL: ${{ env.DB_URL_CLEAN }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
           set -euo pipefail
