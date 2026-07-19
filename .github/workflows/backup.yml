@@ -1,0 +1,222 @@
+# Nightly encrypted offsite backup of the Supabase Postgres DB.
+#
+# Why this exists
+# ---------------
+# Supabase Free tier ships zero automated backups (confirmed by the
+# Database → Backups page in the dashboard). Without this workflow, a
+# botched migration or an accidental "Reset everything" click means
+# permanent data loss. Pro tier ($25/mo) brings native daily backups —
+# but until then (and even after, as a belt-and-braces second copy
+# outside Supabase) this workflow gives us:
+#
+#   • a daily 03:00 UTC snapshot of the entire public schema
+#   • gzipped, then AES-256 symmetrically encrypted with a passphrase
+#     stored in GitHub Secrets — without it the artifact is opaque
+#   • uploaded as a GitHub Release attached to a dated tag
+#   • last 30 daily releases retained; older ones automatically pruned
+#
+# What you need to set up ONCE in GitHub
+# --------------------------------------
+# Repo → Settings → Secrets and variables → Actions → New secret. Add:
+#
+#   1. SUPABASE_DB_URL
+#      Direct (NOT pooled) Postgres connection string for the
+#      Supabase project. Find it in Supabase Dashboard → Project
+#      Settings → Database → "Connection string" → choose "URI" and
+#      "Direct connection" (port 5432, NOT 6543). pg_dump uses session
+#      features the pooler doesn't support, so the pooled URL will
+#      fail with "prepared statement" or "session"-related errors.
+#      Looks like:
+#        postgresql://postgres.<ref>:<db-password>@aws-0-<region>
+#                    .pooler.supabase.com:5432/postgres
+#
+#   2. BACKUP_PASSPHRASE
+#      A strong passphrase for symmetric AES-256 encryption.
+#      Generate with: openssl rand -base64 48
+#      Store it in your password manager — without it the backup
+#      artifacts cannot be decrypted. If you lose it, every encrypted
+#      backup is dead weight.
+#
+# How to restore
+# --------------
+# See RESTORE.md at the repo root. Walk through the procedure with a
+# fresh side-project Supabase DB at least once BEFORE you need it,
+# so you trust the steps when something is actually on fire.
+
+name: Nightly DB backup
+
+on:
+  schedule:
+    # 01:00 UTC = 04:00 KSA — stores are closed and the previous
+    # business day is fully rung up, so the dump is a clean day boundary.
+    - cron: '0 1 * * *'
+  # Allows you to trigger from the Actions tab to test the setup.
+  workflow_dispatch:
+
+permissions:
+  contents: write  # required to create / delete Releases
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Install PostgreSQL 17 client + gpg
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates gnupg lsb-release
+          # PGDG (PostgreSQL global development group) keyring for the
+          # newer pg client packages. Ubuntu 24.04's default
+          # postgresql-client is pg16 — too old to dump from Supabase's
+          # pg17.x (pg_dump requires client version >= server version).
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+
+      - name: Resolve absolute path to pg_dump 17+ and verify version
+        id: pgdump
+        run: |
+          set -euo pipefail
+          # Ubuntu's update-alternatives points /usr/bin/pg_dump at the
+          # OLDEST installed pg client, so apt installing pg17 alongside
+          # the OS's pg16 leaves /usr/bin/pg_dump as the v16 binary —
+          # which then refuses to dump a v17 server ("server version
+          # mismatch", which is exactly what bit us on first run).
+          # Pick the newest pg binary directly from the PGDG bin paths.
+          PG_DUMP=$(ls -d /usr/lib/postgresql/*/bin/pg_dump 2>/dev/null | sort -V | tail -1)
+          if [ -z "$PG_DUMP" ]; then
+            echo "::error::No pg_dump found under /usr/lib/postgresql/*/bin/. The postgresql-client-17 install step must have failed silently."
+            exit 1
+          fi
+          echo "Using $PG_DUMP"
+          "$PG_DUMP" --version
+          # Refuse to run with anything older than pg17 — Supabase server
+          # is on 17.x and a 16.x client will hard-fail mid-dump anyway.
+          MAJOR=$("$PG_DUMP" --version | awk '{print $3}' | cut -d. -f1)
+          if [ "$MAJOR" -lt 17 ]; then
+            echo "::error::pg_dump major version $MAJOR is older than the Supabase server (17). Cannot proceed."
+            exit 1
+          fi
+          echo "pg_dump=$PG_DUMP" >> "$GITHUB_OUTPUT"
+
+      - name: Sanity-check secrets are configured
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PASS: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DB_URL:-}" ]; then
+            echo "::error::SUPABASE_DB_URL secret is not set. Add it under Repo → Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          if [ -z "${PASS:-}" ]; then
+            echo "::error::BACKUP_PASSPHRASE secret is not set. Generate one (openssl rand -base64 48) and add it under Repo → Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          # Reject pooled connection string (port 6543) — pg_dump needs direct (5432).
+          if echo "$DB_URL" | grep -q ':6543'; then
+            echo "::error::SUPABASE_DB_URL appears to be the POOLED connection (port 6543). pg_dump needs the DIRECT connection on port 5432. Update the secret with the 'Direct connection' URI from Supabase → Project Settings → Database."
+            exit 1
+          fi
+
+      - name: Compute timestamp
+        id: ts
+        run: echo "stamp=$(date -u +'%Y-%m-%dT%H-%M-%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Dump → gzip → encrypt
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          STAMP="${{ steps.ts.outputs.stamp }}"
+          OUT="hassad-pos-backup-${STAMP}.sql.gz.gpg"
+
+          # --schema=public         : skip auth/storage/realtime — those
+          #                            are Supabase-managed and a restore
+          #                            would conflict.
+          # --no-owner              : ownership info is bound to the source
+          #                            project's 'postgres' role.
+          # --no-privileges (--no-acl)
+          #                         : skip GRANT/REVOKE — RLS policies are
+          #                            re-applied via supabase-rls.sql in
+          #                            the restore flow (see RESTORE.md).
+          # --clean --if-exists     : restore script DROPs existing objects
+          #                            first, so re-importing into a side
+          #                            project Just Works.
+          # --quote-all-identifiers : safe against future reserved words.
+          # --format=plain          : produces an SQL text file pipeable
+          #                            into psql; simpler than custom
+          #                            format for our scale.
+          # Use the absolute path resolved in the previous step — bypasses
+          # the update-alternatives wiring that pointed /usr/bin/pg_dump
+          # at the wrong (v16) binary.
+          "${{ steps.pgdump.outputs.pg_dump }}" "$DB_URL" \
+            --schema=public \
+            --no-owner --no-privileges \
+            --clean --if-exists \
+            --quote-all-identifiers \
+            --format=plain \
+            | gzip --best \
+            | gpg --batch --yes --symmetric \
+                  --cipher-algo AES256 \
+                  --passphrase "$BACKUP_PASSPHRASE" \
+                  --output "$OUT"
+
+          SIZE=$(du -h "$OUT" | cut -f1)
+          echo "Created $OUT ($SIZE)"
+          echo "out_file=$OUT" >> "$GITHUB_OUTPUT"
+          echo "out_size=$SIZE" >> "$GITHUB_OUTPUT"
+        id: dump
+
+      - name: Create GitHub Release with the encrypted dump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          STAMP="${{ steps.ts.outputs.stamp }}"
+          OUT_FILE="${{ steps.dump.outputs.out_file }}"
+          OUT_SIZE="${{ steps.dump.outputs.out_size }}"
+          # `--repo` is required because the workflow doesn't do an
+          # actions/checkout, so `gh` has no git remote to infer the
+          # target repo from. GITHUB_REPOSITORY is a built-in env var
+          # like "omarkhalawi21/HUMAN-RESOURCE-APP".
+          gh release create "backup-$STAMP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "DB backup $STAMP" \
+            --notes "Automated nightly backup of the public schema.
+
+          - Size: $OUT_SIZE (gzipped + AES-256 encrypted)
+          - Decrypt with the \`BACKUP_PASSPHRASE\` from GitHub Secrets.
+          - Restore procedure: see RESTORE.md at the repo root.
+
+          Older backups are automatically pruned to the last 30 days." \
+            "$OUT_FILE"
+
+      - name: Prune backups older than the last 30
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # `--repo` flag for the same reason as the create step above.
+          # List backup-* releases, newest first, drop the top 30, delete the rest.
+          OLD=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName \
+                  --jq '.[].tagName | select(startswith("backup-"))' \
+                | sort -r \
+                | tail -n +31)
+          if [ -z "$OLD" ]; then
+            echo "No old backups to prune."
+            exit 0
+          fi
+          echo "Pruning:"
+          echo "$OLD"
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          done <<<"$OLD"
