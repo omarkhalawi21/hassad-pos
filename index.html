@@ -118,7 +118,8 @@ function mapSettingsFromDb(r) {
     vatNumber: r.vat_number || '', crNumber: r.cr_number || '', currency: r.currency || 'SAR',
     vatRate: Number(r.vat_rate) || 15, receiptFooterEn: r.receipt_footer_en || '', receiptFooterAr: r.receipt_footer_ar || '' };
 }
-function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active }; }
+function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active, hrBranch: r.hr_branch || '' }; }
+function mapRecipeFromDb(r) { return { id: r.id, itemId: r.item_id, hrItemName: r.hr_item_name || '', qty: Number(r.qty) || 0, unit: r.unit || 'units' }; }
 function mapPayMethodFromDb(r) { return { id: r.id, name: r.name || '', code: r.code || '', active: !!r.active, sort: Number(r.sort_order) || 0 }; }
 // Fallback trio keeps checkout usable until SQL block 17 has been run.
 const DEFAULT_PAY_METHODS = [
@@ -250,7 +251,7 @@ function staffName(id) { const s = state.staff.find(x => x.id === id); return s 
 /* -------------------- DATA LOAD -------------------- */
 async function loadAll() {
   const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR, menuGroupsR, itemMenuGroupsR, devicesR, deviceCatsR, posRolesR, staffRolesR, payMethodsR] = await Promise.all([
+  const [settingsR, branchesR, staffR, categoriesR, itemsR, offR, ordersR, shiftsR, movementsR, modGroupsR, modOptionsR, itemModsR, menuGroupsR, itemMenuGroupsR, devicesR, deviceCatsR, posRolesR, staffRolesR, payMethodsR, recipesR, hrItemsR] = await Promise.all([
     sb.from('pos_settings').select('*').limit(1).maybeSingle(),
     sb.from('branches').select('*').order('name'),
     sb.from('staff').select('*').order('first_name'),
@@ -279,6 +280,8 @@ async function loadAll() {
     sb.from('pos_roles').select('*').order('name'),
     sb.from('staff_roles').select('*'),
     sb.from('payment_methods').select('*').order('sort_order'),
+    sb.from('recipes').select('*'),
+    sb.from('hr_items').select('*').order('name'),
   ]);
   if (settingsR.data) { const s = mapSettingsFromDb(settingsR.data); state.settingsId = s._id; state.settings = s; }
   state.branches   = (branchesR.data   || []).map(mapBranchFromDb);
@@ -302,6 +305,8 @@ async function loadAll() {
   state.deviceCategories = (deviceCatsR?.data || []).map(r => ({ deviceId: r.device_id, categoryId: r.category_id }));
   state.posRoles   = (posRolesR?.data   || []).map(r => ({ id: r.id, name: r.name || '', permissions: Array.isArray(r.permissions) ? r.permissions : [] }));
   state.payMethods = (payMethodsR?.data || []).map(mapPayMethodFromDb);
+  state.recipes    = (recipesR?.data    || []).map(mapRecipeFromDb);
+  state.hrItems    = (hrItemsR?.data    || []).map(r => ({ name: r.name, unit: r.unit || 'units', category: r.category || '' }));
   state.staffRoles = (staffRolesR?.data || []).map(r => ({ staffId: r.staff_id, roleId: r.role_id }));
 }
 async function loadOrderDetail(orderId) {
@@ -1978,6 +1983,31 @@ function renderItemProfile(id) {
       </table>` : '<div class="px-5 py-6 text-sm text-slate-400">No modifier prompts on this product.</div>'}
     </div>
 
+    <div class="bg-white rounded-2xl shadow-card overflow-hidden mb-4">
+      <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+        <h3 class="font-display font-semibold text-slate-900">Recipe <span class="text-xs font-normal text-slate-400">(inventory consumed per sale — synced nightly to the Hassad app)</span></h3>
+        <button onclick="openRecipeModal('${it.id}')" class="btn btn-ghost !py-1.5 !px-3 !text-xs">+ Add ingredient</button>
+      </div>
+      ${(() => {
+        const rows = (state.recipes || []).filter(r => r.itemId === it.id);
+        if (!rows.length) return '<div class="px-5 py-6 text-sm text-slate-400">No recipe — sales of this product won\'t deduct inventory.</div>';
+        return `
+      <table class="w-full text-sm">
+        <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
+          <th class="text-start px-5 py-2">Ingredient (HR inventory)</th><th class="text-end px-3 py-2">Qty / sale</th><th class="text-start px-3 py-2">Unit</th><th class="px-3 py-2"></th></tr></thead>
+        <tbody class="divide-y divide-slate-100">
+          ${rows.map(r => `
+            <tr>
+              <td class="px-5 py-2.5 font-medium">${escapeHTML(r.hrItemName)}${(state.hrItems || []).some(h => h.name.toLowerCase() === r.hrItemName.toLowerCase()) ? '' : ' <span class="badge badge-amber" title="Not found in the synced HR item list — check the spelling or run the sync">unmatched</span>'}</td>
+              <td class="px-3 py-2.5 text-end tabular-nums">${r.qty}</td>
+              <td class="px-3 py-2.5 text-slate-500">${escapeHTML(r.unit)}</td>
+              <td class="px-3 py-2.5 text-end"><button onclick="removeRecipeRow('${r.id}')" class="btn btn-danger !py-1 !px-2.5 !text-xs">Remove</button></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+      })()}
+    </div>
+
     <div class="bg-white rounded-2xl shadow-card p-5">
       <h3 class="font-display font-semibold text-slate-900 mb-3">Groups <span class="text-xs font-normal text-slate-400">(channel menus — used by aggregator integrations)</span></h3>
       <div class="flex gap-3 flex-wrap">
@@ -2369,9 +2399,11 @@ function openBranchModal(id) {
     <div class="space-y-3">
       <div><label class="label">Name</label><input id="br-name" class="input" value="${escapeHTML(editing?.name || '')}" placeholder="e.g. KHOBAR"></div>
       <div><label class="label">Name (Arabic)</label><input id="br-ar" class="input" dir="rtl" value="${escapeHTML(editing?.nameAr || '')}"></div>
+      <div><label class="label">HR inventory branch</label><input id="br-hr" class="input" value="${escapeHTML(editing?.hrBranch || '')}" placeholder="Branch name as written in the Hassad app inventory">
+        <p class="text-xs text-slate-400 mt-1">Used by the nightly inventory sync. Leave empty if it matches the POS name.</p></div>
       <div><label class="label">Active</label><select id="br-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
     </div>`, async () => {
-    const row = { name: $('#br-name').value.trim().toUpperCase(), name_ar: $('#br-ar').value.trim(), active: $('#br-active').value === '1' };
+    const row = { name: $('#br-name').value.trim().toUpperCase(), name_ar: $('#br-ar').value.trim(), hr_branch: $('#br-hr').value.trim() || null, active: $('#br-active').value === '1' };
     if (!row.name) { toast('Name required', 'error'); return false; }
     const q = editing ? sb.from('branches').update(row).eq('id', editing.id) : sb.from('branches').insert(row);
     const { error } = await q;
@@ -2379,6 +2411,50 @@ function openBranchModal(id) {
     await loadAll(); render(); toast('Saved', 'success');
   });
 }
+// ---- Recipes (inventory consumed per sale; synced nightly to the HR app) ----
+function openRecipeModal(itemId) {
+  const it = state.items.find(i => i.id === itemId);
+  if (!it) return;
+  const hrList = state.hrItems || [];
+  openModal('Add ingredient — ' + it.nameEn, `
+    <div class="space-y-3">
+      <div>
+        <label class="label">Ingredient (HR inventory item)</label>
+        <input id="rc-name" class="input" list="rc-hr-list" onchange="rcSyncUnit()" placeholder="${hrList.length ? 'Start typing to pick…' : 'Type the exact item name from the Hassad app inventory'}">
+        <datalist id="rc-hr-list">${hrList.map(h => `<option value="${escapeHTML(h.name)}">${escapeHTML(h.unit)}${h.category ? ' · ' + escapeHTML(h.category) : ''}</option>`).join('')}</datalist>
+        ${hrList.length ? '' : '<p class="text-xs text-amber-600 mt-1">The synced ingredient list is empty — names typed here must match the Hassad app inventory exactly. They\'ll validate on the first sync.</p>'}
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Qty per sale</label><input id="rc-qty" type="number" min="0.001" step="0.001" class="input" placeholder="e.g. 18"></div>
+        <div><label class="label">Unit</label><input id="rc-unit" class="input" placeholder="g / ml / units"></div>
+      </div>
+      <p class="text-xs text-slate-400">Example: Latte consumes 18 g of Espresso Beans — qty 18, unit g. Use the same unit the item has in the Hassad app inventory.</p>
+    </div>`, async () => {
+    const name = $('#rc-name').value.trim();
+    const qty = parseFloat($('#rc-qty').value);
+    let unit = $('#rc-unit').value.trim();
+    if (!name) { toast('Pick or type an ingredient name', 'error'); return false; }
+    if (!qty || qty <= 0) { toast('Qty per sale must be above zero', 'error'); return false; }
+    const hr = hrList.find(h => h.name.toLowerCase() === name.toLowerCase());
+    if (!unit) unit = hr?.unit || 'units';
+    const { error } = await sb.from('recipes').insert({ item_id: itemId, hr_item_name: hr?.name || name, qty, unit });
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    await loadAll(); render(); toast('Ingredient added', 'success');
+  });
+}
+// Pre-fill the unit field when a synced HR item is picked in the recipe modal.
+function rcSyncUnit() {
+  const inp = $('#rc-name'), u = $('#rc-unit');
+  if (!inp || !u) return;
+  const hr = (state.hrItems || []).find(h => h.name.toLowerCase() === inp.value.trim().toLowerCase());
+  if (hr && !u.value.trim()) u.value = hr.unit;
+}
+async function removeRecipeRow(id) {
+  const { error } = await sb.from('recipes').delete().eq('id', id);
+  if (error) { toast(humanizeError(error), 'error'); return; }
+  await loadAll(); render(); toast('Ingredient removed', 'success');
+}
+
 function renderPayments() {
   return `
     <div class="flex items-center justify-between mb-4">

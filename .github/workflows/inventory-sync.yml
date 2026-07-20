@@ -1,0 +1,47 @@
+# Nightly POS → HR inventory sync.
+#
+# After close each night, yesterday's completed POS sales are exploded
+# through the product recipes and posted into the Hassad HR app's
+# inventory as `sale` movements (see scripts/inventory-sync.mjs).
+# Idempotent — re-running a date never double-deducts.
+#
+# Secrets required (Repo → Settings → Secrets and variables → Actions):
+#   SUPABASE_DB_URL – POS DB, session-pooler URI (already set for backups)
+#   HR_DB_URL       – HR DB, session-pooler URI (same value as the HR
+#                     repo's SUPABASE_DB_URL backup secret)
+
+name: Inventory sync
+
+on:
+  schedule:
+    # 21:30 UTC = 00:30 KSA — after the POS business day is fully rung up.
+    - cron: '30 21 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Business date to sync (YYYY-MM-DD). Empty = yesterday (KSA).'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pg client library
+        run: npm install --no-save pg@8
+
+      - name: Run sync
+        env:
+          POS_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          HR_DB_URL: ${{ secrets.HR_DB_URL }}
+          SYNC_DATE: ${{ inputs.date }}
+        run: node scripts/inventory-sync.mjs

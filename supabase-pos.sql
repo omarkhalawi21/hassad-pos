@@ -999,6 +999,59 @@ SELECT 'NINJA', 'ninja', 3
 WHERE NOT EXISTS (SELECT 1 FROM public.payment_methods WHERE code = 'ninja');
 
 -- =============================================================
+-- 18. RECIPES + HR INVENTORY BRIDGE
+--     Connects POS sales to the HR app's existing inventory.
+--     recipes: per menu item, which HR inventory ingredient and how
+--       much is consumed per unit sold (referenced by NAME, since the
+--       HR project is a separate database; the nightly sync resolves
+--       names to per-branch HR item rows).
+--     hr_items: read-only mirror of HR inventory item names/units,
+--       refreshed by the sync job, so the recipe editor has a real
+--       picker instead of free text.
+--     branches.hr_branch: explicit mapping to the branch value used in
+--       the HR inventory rows (falls back to the POS branch name).
+-- =============================================================
+CREATE TABLE IF NOT EXISTS public.recipes (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  item_id      uuid NOT NULL REFERENCES public.menu_items(id) ON DELETE CASCADE,
+  hr_item_name text NOT NULL,
+  qty          numeric(12,3) NOT NULL CHECK (qty > 0),
+  unit         text NOT NULL DEFAULT 'units',
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (item_id, hr_item_name)
+);
+CREATE TABLE IF NOT EXISTS public.hr_items (
+  name       text PRIMARY KEY,
+  unit       text NOT NULL DEFAULT 'units',
+  category   text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.branches ADD COLUMN IF NOT EXISTS hr_branch text;
+
+ALTER TABLE public.recipes  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.hr_items ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "recipes_select_authenticated" ON public.recipes;
+DROP POLICY IF EXISTS "recipes_insert_roles"         ON public.recipes;
+DROP POLICY IF EXISTS "recipes_update_roles"         ON public.recipes;
+DROP POLICY IF EXISTS "recipes_delete_roles"         ON public.recipes;
+CREATE POLICY "recipes_select_authenticated"
+  ON public.recipes FOR SELECT TO authenticated USING (true);
+CREATE POLICY "recipes_insert_roles"
+  ON public.recipes FOR INSERT TO authenticated WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "recipes_update_roles"
+  ON public.recipes FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "recipes_delete_roles"
+  ON public.recipes FOR DELETE TO authenticated USING (public.has_role(ARRAY['admin','manager']));
+
+-- hr_items is written ONLY by the sync job (direct Postgres, bypasses
+-- RLS); the app just reads it for the picker.
+DROP POLICY IF EXISTS "hr_items_select_authenticated" ON public.hr_items;
+CREATE POLICY "hr_items_select_authenticated"
+  ON public.hr_items FOR SELECT TO authenticated USING (true);
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
