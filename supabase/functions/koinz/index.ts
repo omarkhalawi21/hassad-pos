@@ -173,6 +173,48 @@ async function doDelete(p: any) {
   return json({ ok: status === 200, status, message: status === 200 ? "" : (raw || "").slice(0, 200) }, 200);
 }
 
+// ---- sync branches / cashiers -----------------------------------------------
+// Koinz must know our branches + cashiers (by OUR ids) before it will authorise
+// points/validate/redeem -- otherwise it returns 401 "Unauthorized cashier".
+// Read straight from the DB (service role) and push; integration_id = our own
+// branch.id / staff.id, which is exactly what the app sends in every op.
+async function doSyncBranches() {
+  const db = admin();
+  const { data: branches, error } = await db.from("branches").select("id, name, name_ar, active");
+  if (error) return json({ error: error.message }, 500);
+  const body = {
+    branches: (branches || []).map((b: any) => ({
+      integration_id: b.id,
+      en_name: b.name || "",
+      ar_name: b.name_ar || b.name || "",
+      phone_numbers: [],
+      deleted_at: b.active === false ? new Date().toISOString() : null,
+    })),
+  };
+  const { status, raw } = await koinz("/api/pos/v2.1/branches", body);
+  return json({ ok: status === 200, status, count: body.branches.length, message: status === 200 ? "" : (raw || "").slice(0, 300) }, 200);
+}
+
+async function doSyncCashiers() {
+  const db = admin();
+  const [{ data: staff, error: se }, { data: branches }] = await Promise.all([
+    db.from("staff").select("id, first_name, last_name, branch_id, active"),
+    db.from("branches").select("id"),
+  ]);
+  if (se) return json({ error: se.message }, 500);
+  const allBranchIds = (branches || []).map((b: any) => b.id);
+  const body = {
+    cashiers: (staff || []).filter((s: any) => s.active !== false).map((s: any) => {
+      const name = `${s.first_name || ""} ${s.last_name || ""}`.trim() || "Staff";
+      // Branch-locked staff -> their branch; admin/manager (no branch) -> all.
+      const branchIds = s.branch_id ? [s.branch_id] : allBranchIds;
+      return { integration_id: s.id, branch_integration_ids: branchIds, en_name: name, ar_name: name, deleted_at: null };
+    }),
+  };
+  const { status, raw } = await koinz("/api/pos/v2.1/cashiers", body);
+  return json({ ok: status === 200, status, count: body.cashiers.length, message: status === 200 ? "" : (raw || "").slice(0, 300) }, 200);
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -183,11 +225,13 @@ Deno.serve(async (req) => {
   const action = p?.action;
   try {
     switch (action) {
-      case "flush":    return await doFlush();
-      case "validate": return await doValidate(p);
-      case "redeem":   return await doRedeem(p);
-      case "delete":   return await doDelete(p);
-      default:         return json({ error: `Unknown action: ${action}` }, 400);
+      case "flush":         return await doFlush();
+      case "validate":      return await doValidate(p);
+      case "redeem":        return await doRedeem(p);
+      case "delete":        return await doDelete(p);
+      case "sync-branches": return await doSyncBranches();
+      case "sync-cashiers": return await doSyncCashiers();
+      default:              return json({ error: `Unknown action: ${action}` }, 400);
     }
   } catch (e) {
     return json({ error: e instanceof Error ? e.message : String(e) }, 500);

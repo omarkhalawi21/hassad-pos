@@ -2820,6 +2820,7 @@ function renderSettings() {
           <span class="text-sm font-medium text-slate-800">Koinz loyalty</span>
         </label>
         <div class="text-[10px] text-slate-500 mt-1">Shows the points prompt after checkout and the Redeem button on the till. Requires the <code>KOINZ_API_KEY</code> secret set on the <code>koinz</code> Edge Function — otherwise calls fail.</div>
+        ${isAdmin() ? `<button type="button" onclick="koinzSync()" class="btn btn-ghost btn-sm mt-2">↑ Sync branches &amp; cashiers to Koinz</button><div class="text-[10px] text-slate-500 mt-1">Run once (and after adding branches/staff) so Koinz recognises your cashiers — otherwise points/redeem return “Unauthorized cashier”.</div>` : ''}
       </div>
       <button onclick="saveSettings()" class="btn btn-primary">Save settings</button>
     </div>`;
@@ -2889,6 +2890,18 @@ async function koinzLoadStatus() {
       .select('operation_id', { count: 'exact', head: true }).neq('status', 'synced');
     _koinzPending = count || 0;
   } catch (_) { /* keep last known */ }
+}
+
+// ---- sync branches + cashiers to Koinz (admin) ----
+// Koinz rejects points/redeem with "Unauthorized cashier" until it knows our
+// branches + cashiers. Run this once (and after adding branches/staff).
+async function koinzSync() {
+  toast('Syncing to Koinz…', 'info');
+  const b = await koinzInvoke('sync-branches', {});
+  if (b.error || !b.ok) { toast('Branch sync failed: ' + (b.error || b.message || ('HTTP ' + b.status)), 'error'); return; }
+  const c = await koinzInvoke('sync-cashiers', {});
+  if (c.error || !c.ok) { toast('Cashier sync failed: ' + (c.error || c.message || ('HTTP ' + c.status)), 'error'); return; }
+  toast(`Synced ${b.count} branches + ${c.count} cashiers to Koinz`, 'success');
 }
 
 // ---- grant points (after checkout) ----
