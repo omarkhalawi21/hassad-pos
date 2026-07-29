@@ -116,7 +116,8 @@ let state = emptyState();
 function mapSettingsFromDb(r) {
   return { _id: r.id, companyName: r.company_name || '', companyNameAr: r.company_name_ar || '',
     vatNumber: r.vat_number || '', crNumber: r.cr_number || '', currency: r.currency || 'SAR',
-    vatRate: Number(r.vat_rate) || 15, receiptFooterEn: r.receipt_footer_en || '', receiptFooterAr: r.receipt_footer_ar || '' };
+    vatRate: Number(r.vat_rate) || 15, receiptFooterEn: r.receipt_footer_en || '', receiptFooterAr: r.receipt_footer_ar || '',
+    koinzEnabled: !!r.koinz_enabled };
 }
 function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active, hrBranch: r.hr_branch || '' }; }
 function mapRecipeFromDb(r) { return { id: r.id, itemId: r.item_id, hrItemName: r.hr_item_name || '', qty: Number(r.qty) || 0, unit: r.unit || 'units' }; }
@@ -308,6 +309,7 @@ async function loadAll() {
   state.recipes    = (recipesR?.data    || []).map(mapRecipeFromDb);
   state.hrItems    = (hrItemsR?.data    || []).map(r => ({ name: r.name, unit: r.unit || 'units', category: r.category || '' }));
   state.staffRoles = (staffRolesR?.data || []).map(r => ({ staffId: r.staff_id, roleId: r.role_id }));
+  koinzLoadStatus().catch(() => {}); // sync-chip count; non-blocking
 }
 async function loadOrderDetail(orderId) {
   if (state.orderDetailCache[orderId]) return state.orderDetailCache[orderId];
@@ -586,6 +588,7 @@ function closeModal() {
   _checkoutSplit = null; // transient checkout state never bleeds into the next modal
   if (typeof _itemPhoto !== 'undefined') _itemPhoto = undefined;
   if (typeof _pickerSel !== 'undefined') _pickerSel = null;
+  if (typeof _koinzGift !== 'undefined') _koinzGift = null;
 }
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('modal-root')) closeModal(); });
 
@@ -784,6 +787,8 @@ function renderPos() {
       <span class="badge badge-green">Till open</span>
       <span class="text-slate-500">since ${fmtDateTime(shift.openedAt)} · float ${fmtMoney(shift.openingFloat)} · ${escapeHTML(staffName(shift.openedBy))}</span>
       <div class="ms-auto flex gap-1.5">
+        ${koinzEnabled() ? `<button onclick="openKoinzRedeemModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">★ Redeem</button>` : ''}
+        ${koinzEnabled() && _koinzPending > 0 ? `<button onclick="koinzFlush(true)" class="btn btn-ghost !py-1 !px-3 !text-xs" style="color:#b45309" title="Unsynced Koinz points — tap to sync now">⟳ ${_koinzPending}</button>` : ''}
         ${can('pos.drawer') ? `<button onclick="openDrawerModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Drawer</button>` : ''}
         <button onclick="location.hash='#/devices'" class="btn btn-ghost !py-1 !px-3 !text-xs">Devices</button>
         ${can('pos.close_till') ? `<button onclick="openCloseTillModal()" class="btn btn-ghost !py-1 !px-3 !text-xs">Close till</button>` : ''}
@@ -1272,6 +1277,8 @@ async function saveOrder() {
   toast(`Order #${mapped.orderNo} completed`, 'success');
   broadcastPaid(mapped); // thank-you screen on the customer display
   printReceipt(mapped.id, 'both'); // customer receipt + bar ticket, in order
+  // Koinz points prompt — after the receipt fires (print popup spawns first).
+  if (koinzEnabled()) setTimeout(() => openKoinzGrantModal(mapped), 300);
   return true;
 }
 
@@ -2807,6 +2814,14 @@ function renderSettings() {
       </div>
       <div><label class="label">Receipt footer (EN)</label><input id="set-footer-en" class="input" value="${escapeHTML(s.receiptFooterEn)}"></div>
       <div><label class="label">Receipt footer (AR)</label><input id="set-footer-ar" class="input" dir="rtl" value="${escapeHTML(s.receiptFooterAr)}"></div>
+      <div class="border-t border-slate-100 pt-3 mt-1">
+        <label class="flex items-center gap-2.5 cursor-pointer">
+          <input id="set-koinz" type="checkbox" class="w-4 h-4" ${s.koinzEnabled?'checked':''}>
+          <span class="text-sm font-medium text-slate-800">Koinz loyalty</span>
+        </label>
+        <div class="text-[10px] text-slate-500 mt-1">Shows the points prompt after checkout and the Redeem button on the till. Requires the <code>KOINZ_API_KEY</code> secret set on the <code>koinz</code> Edge Function — otherwise calls fail.</div>
+        ${isAdmin() ? `<button type="button" onclick="koinzSync()" class="btn btn-ghost btn-sm mt-2">↑ Sync branches &amp; cashiers to Koinz</button><div class="text-[10px] text-slate-500 mt-1">Run once (and after adding branches/staff) so Koinz recognises your cashiers — otherwise points/redeem return “Unauthorized cashier”.</div>` : ''}
+      </div>
       <button onclick="saveSettings()" class="btn btn-primary">Save settings</button>
     </div>`;
 }
@@ -2814,10 +2829,164 @@ async function saveSettings() {
   const row = { company_name: $('#set-name').value.trim(), company_name_ar: $('#set-name-ar').value.trim(),
     vat_number: $('#set-vat').value.trim(), cr_number: $('#set-cr').value.trim(),
     currency: $('#set-currency').value.trim() || 'SAR', vat_rate: parseFloat($('#set-rate').value) || 15,
-    receipt_footer_en: $('#set-footer-en').value.trim(), receipt_footer_ar: $('#set-footer-ar').value.trim(), updated_at: new Date().toISOString() };
+    receipt_footer_en: $('#set-footer-en').value.trim(), receipt_footer_ar: $('#set-footer-ar').value.trim(),
+    koinz_enabled: !!$('#set-koinz')?.checked, updated_at: new Date().toISOString() };
   const { error } = await sb.from('pos_settings').update(row).eq('id', state.settingsId);
   if (error) { toast(humanizeError(error), 'error'); return; }
   await loadAll(); render(); toast('Settings saved', 'success');
+}
+
+/* -------------------- KOINZ LOYALTY -------------------- */
+// Outbound-only loyalty (points + gift redemption). Every Koinz call proxies
+// through the `koinz` Edge Function (holds the api-key). Points grants are a
+// DURABLE OUTBOX (koinz_operations) resent until Koinz returns 200. Gated by
+// settings.koinzEnabled; off by default.
+let _koinzGift = null;      // validated gift awaiting redeem
+let _koinzPending = 0;      // count of not-yet-synced points ops (sync chip)
+function koinzEnabled() { return !!state.settings?.koinzEnabled; }
+
+// Normalise a cashier-typed KSA number to Koinz's shape: local number + a
+// separate country code. Mirrors Koinz's own example, which KEEPS the national
+// trunk 0 (EG "01xxxxxxxxx", +2) -> KSA "05xxxxxxxx", +966. (Keep-0 vs drop-0
+// is pending Koinz's confirmation; if they want it dropped, change here only.)
+function koinzPhone(raw) {
+  let d = String(raw || '').replace(/[^\d+]/g, '');
+  if (d.startsWith('+966')) d = '0' + d.slice(4);
+  else if (d.startsWith('966')) d = '0' + d.slice(3);
+  if (d && !d.startsWith('0')) d = '0' + d;
+  return { phone: d, country: '+966' };
+}
+function koinzValidPhone(raw) { return /^05\d{8}$/.test(koinzPhone(raw).phone); }
+
+async function koinzInvoke(action, body) {
+  try {
+    const { data, error } = await sb.functions.invoke('koinz', { body: { action, ...body } });
+    if (error) {
+      let msg = error.message || 'Koinz request failed';
+      try { const ctx = await error.context?.json?.(); if (ctx?.error || ctx?.message) msg = ctx.error || ctx.message; } catch (_) {}
+      return { ok: false, error: msg };
+    }
+    return data || {};
+  } catch (e) { return { ok: false, error: e.message || String(e) }; }
+}
+
+// Send every owed points op. Silent when called after a grant; notify=true
+// toasts the outcome (manual "Sync now").
+async function koinzFlush(notify) {
+  const res = await koinzInvoke('flush', {});
+  await koinzLoadStatus();
+  if (notify) {
+    if (res.error) toast('Koinz sync failed: ' + res.error, 'error');
+    else if (res.failed) toast(`Koinz: ${res.synced || 0} synced, ${res.failed} still pending`, 'error');
+    else toast(`Koinz: ${res.synced || 0} synced`, 'success');
+    render();
+  }
+  return res;
+}
+async function koinzLoadStatus() {
+  if (!koinzEnabled()) { _koinzPending = 0; return; }
+  try {
+    const { count } = await sb.from('koinz_operations')
+      .select('operation_id', { count: 'exact', head: true }).neq('status', 'synced');
+    _koinzPending = count || 0;
+  } catch (_) { /* keep last known */ }
+}
+
+// ---- sync branches + cashiers to Koinz (admin) ----
+// Koinz rejects points/redeem with "Unauthorized cashier" until it knows our
+// branches + cashiers. Run this once (and after adding branches/staff).
+async function koinzSync() {
+  toast('Syncing to Koinz…', 'info');
+  // Cashiers are the auth gate (Koinz's "Unauthorized cashier") -- sync those
+  // first and treat branch metadata as best-effort so a branch-side rejection
+  // (e.g. Koinz requiring branch phone numbers) never blocks the cashiers.
+  const c = await koinzInvoke('sync-cashiers', {});
+  if (c.error || !c.ok) { toast('Cashier sync failed: ' + (c.error || c.message || ('HTTP ' + c.status)), 'error'); return; }
+  const b = await koinzInvoke('sync-branches', {});
+  if (b.error || !b.ok) { toast(`Synced ${c.count} cashiers ✓. Branches skipped: ${b.message || b.error || ('HTTP ' + b.status)}`, 'error'); return; }
+  toast(`Synced ${b.count} branches + ${c.count} cashiers to Koinz`, 'success');
+}
+
+// ---- grant points (after checkout) ----
+function openKoinzGrantModal(order) {
+  if (!koinzEnabled() || !order) return;
+  const body = `
+    <div class="space-y-3">
+      <div class="text-sm text-slate-600">Grant Koinz points for order <span class="font-semibold">#${order.orderNo}</span> · ${fmtMoney(order.total)} ${escapeHTML(state.settings.currency)}.</div>
+      <div>
+        <label class="label">Customer phone</label>
+        <input id="koinz-phone" class="input" inputmode="tel" autocomplete="off" placeholder="05xxxxxxxx" />
+        <div class="text-[10px] text-slate-500 mt-1">The only field you enter — points come from the order total. Skip if the customer isn't a member.</div>
+      </div>
+    </div>`;
+  openModal('Koinz points', body, async () => {
+    const raw = $('#koinz-phone')?.value || '';
+    if (!koinzValidPhone(raw)) { toast('Enter a valid Saudi mobile (05xxxxxxxx)', 'error'); return false; }
+    const { phone, country } = koinzPhone(raw);
+    const me = currentStaff();
+    const { error } = await sb.from('koinz_operations').insert({
+      order_id: order.id, branch_id: order.branchId, cashier_id: me?.id || null,
+      phone_number: phone, country_code: country,
+      receipt_value: order.total, receipt_code: String(order.orderNo), op_timestamp: Date.now(),
+    });
+    if (error) { toast(humanizeError(error), 'error'); return false; }
+    toast('Points queued for ' + phone, 'success');
+    koinzFlush(false); // fire-and-forget; the outbox resends if this fails
+    return true;
+  }, { saveLabel: 'Grant points' });
+  setTimeout(() => document.getElementById('koinz-phone')?.focus(), 30);
+}
+
+// ---- redeem gift ----
+function openKoinzRedeemModal() {
+  _koinzGift = null;
+  openModal('Redeem Koinz gift', `<div id="koinz-redeem-body">${koinzRedeemBodyHTML()}</div>`, null, {});
+}
+function koinzRedeemRefresh() { const el = document.getElementById('koinz-redeem-body'); if (el) el.innerHTML = koinzRedeemBodyHTML(); }
+function koinzRedeemBodyHTML() {
+  const g = _koinzGift;
+  return `
+    <div class="space-y-3">
+      <div>
+        <label class="label">Gift code</label>
+        <div class="flex gap-2">
+          <input id="koinz-code" class="input flex-1" autocomplete="off" placeholder="Code from the customer" value="${g ? escapeHTML(g.code) : ''}" ${g ? 'disabled' : ''} onkeydown="if(event.key==='Enter'){event.preventDefault();koinzDoValidate();}" />
+          ${g ? '' : `<button type="button" onclick="koinzDoValidate()" class="btn btn-primary shrink-0">Verify</button>`}
+        </div>
+      </div>
+      ${g ? `
+        <div class="rounded-xl border p-3" style="border-color:#a7f3d0;background:#ecfdf5">
+          <div class="text-sm"><span class="text-slate-500">Customer</span> <span class="font-semibold text-slate-900">${escapeHTML(g.customer || '—')}</span></div>
+          <div class="text-sm mt-1"><span class="text-slate-500">Gift</span> <span class="font-semibold text-slate-900">${escapeHTML(g.gift?.name || '—')}</span>${g.gift?.price != null ? ` · ${fmtMoney(g.gift.price)}` : ''}</div>
+          ${g.gift?.image ? `<img src="${escapeHTML(g.gift.image)}" class="mt-2 h-16 rounded-lg object-cover" onerror="this.style.display='none'">` : ''}
+        </div>
+        <div class="flex gap-2">
+          <button type="button" onclick="_koinzGift=null; koinzRedeemRefresh();" class="btn btn-ghost flex-1">Back</button>
+          <button type="button" onclick="koinzDoRedeem()" class="btn btn-primary flex-1">Redeem gift</button>
+        </div>` : ''}
+    </div>`;
+}
+async function koinzDoValidate() {
+  const code = ($('#koinz-code')?.value || '').trim();
+  if (!code) { toast('Enter a gift code', 'error'); return; }
+  const me = currentStaff();
+  const res = await koinzInvoke('validate', { redeem_code: code, cashier_integration_id: me?.id || null });
+  if (res.error) { toast('Koinz: ' + res.error, 'error'); return; }
+  if (res.invalid || !res.ok) { toast('Invalid gift code', 'error'); return; }
+  _koinzGift = { code, customer: res.customer_name, gift: res.gift };
+  koinzRedeemRefresh();
+}
+async function koinzDoRedeem() {
+  const g = _koinzGift; if (!g) return;
+  const me = currentStaff();
+  const res = await koinzInvoke('redeem', {
+    redeem_code: g.code, cashier_integration_id: me?.id || null, branch_id: myBranchId() || posBranchId(),
+    customer_name: g.customer || null, gift_name: g.gift?.name || null, gift_price: g.gift?.price ?? null,
+  });
+  if (res.error) { toast('Koinz: ' + res.error, 'error'); return; }
+  if (res.invalid || !res.ok) { toast('Redeem failed — the code may be used or invalid', 'error'); return; }
+  toast(`Gift redeemed for ${g.customer || 'customer'}`, 'success');
+  _koinzGift = null; closeModal();
 }
 
 /* -------------------- INIT -------------------- */
