@@ -1051,6 +1051,78 @@ DROP POLICY IF EXISTS "hr_items_select_authenticated" ON public.hr_items;
 CREATE POLICY "hr_items_select_authenticated"
   ON public.hr_items FOR SELECT TO authenticated USING (true);
 
+-- 19. KOINZ LOYALTY
+-- Outbound-only loyalty (points + gift redemption). Every call to Koinz goes
+-- through the `koinz` Edge Function, which holds the api-key secret -- the
+-- browser never sees it. koinz_operations is the DURABLE OUTBOX Koinz's spec
+-- mandates: each points grant is stored with its own GUID + timestamp and
+-- resent UNCHANGED until Koinz returns 200 (their dedupe is by operation_id).
+-- The Edge Function uses the service role (bypasses RLS) to flip status and to
+-- log redemptions; the app only inserts pending point rows and reads status.
+ALTER TABLE public.pos_settings ADD COLUMN IF NOT EXISTS koinz_enabled boolean NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS public.koinz_operations (
+  operation_id  uuid primary key default gen_random_uuid(),  -- the GUID sent to Koinz
+  order_id      uuid references public.orders(id) on delete set null,
+  branch_id     uuid not null references public.branches(id) on delete restrict,
+  cashier_id    uuid references public.staff(id) on delete set null,
+  phone_number  text not null,                -- as sent to Koinz (local, no country code)
+  country_code  text not null default '+966',
+  receipt_value numeric(12,2) not null,       -- invoice value paid (local currency)
+  receipt_code  text not null default '',
+  op_timestamp  bigint not null,              -- UNIX ms, invoice time
+  status        text not null default 'pending' CHECK (status IN ('pending','synced','failed')),
+  attempts      int not null default 0,
+  should_retry  boolean not null default true,
+  last_error    text,
+  created_at    timestamptz not null default now(),
+  synced_at     timestamptz
+);
+CREATE INDEX IF NOT EXISTS koinz_ops_status_idx ON public.koinz_operations(status);
+CREATE INDEX IF NOT EXISTS koinz_ops_branch_idx ON public.koinz_operations(branch_id);
+
+CREATE TABLE IF NOT EXISTS public.koinz_redemptions (
+  id            uuid primary key default gen_random_uuid(),
+  redeem_code   text not null,
+  branch_id     uuid references public.branches(id) on delete set null,
+  cashier_id    uuid references public.staff(id) on delete set null,
+  customer_name text,
+  gift_name     text,
+  gift_price    numeric(12,2),
+  status        text not null default 'redeemed' CHECK (status IN ('redeemed','failed')),
+  created_at    timestamptz not null default now()
+);
+CREATE INDEX IF NOT EXISTS koinz_redemptions_branch_idx ON public.koinz_redemptions(branch_id);
+
+ALTER TABLE public.koinz_operations  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.koinz_redemptions ENABLE ROW LEVEL SECURITY;
+
+-- koinz_operations: read own-branch (admin/manager all); cashiers insert for
+-- their branch; only admin/manager update (manual retry) or admin delete. The
+-- Edge Function's service role bypasses these to run the flush.
+DROP POLICY IF EXISTS "koinz_ops_select" ON public.koinz_operations;
+CREATE POLICY "koinz_ops_select" ON public.koinz_operations FOR SELECT TO authenticated
+  USING (public.has_role(ARRAY['admin','manager']) OR branch_id = public.my_branch_id());
+DROP POLICY IF EXISTS "koinz_ops_insert" ON public.koinz_operations;
+CREATE POLICY "koinz_ops_insert" ON public.koinz_operations FOR INSERT TO authenticated
+  WITH CHECK (public.has_role(ARRAY['admin','manager']) OR (public.has_role(ARRAY['cashier']) AND branch_id = public.my_branch_id()));
+DROP POLICY IF EXISTS "koinz_ops_update" ON public.koinz_operations;
+CREATE POLICY "koinz_ops_update" ON public.koinz_operations FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager'])) WITH CHECK (public.has_role(ARRAY['admin','manager']));
+DROP POLICY IF EXISTS "koinz_ops_delete" ON public.koinz_operations;
+CREATE POLICY "koinz_ops_delete" ON public.koinz_operations FOR DELETE TO authenticated
+  USING (public.is_admin());
+
+-- koinz_redemptions: read own-branch; rows are written ONLY by the Edge
+-- Function (service role), so there is no client INSERT/UPDATE policy; admin
+-- may delete for cleanup.
+DROP POLICY IF EXISTS "koinz_redemptions_select" ON public.koinz_redemptions;
+CREATE POLICY "koinz_redemptions_select" ON public.koinz_redemptions FOR SELECT TO authenticated
+  USING (public.has_role(ARRAY['admin','manager']) OR branch_id = public.my_branch_id());
+DROP POLICY IF EXISTS "koinz_redemptions_delete" ON public.koinz_redemptions;
+CREATE POLICY "koinz_redemptions_delete" ON public.koinz_redemptions FOR DELETE TO authenticated
+  USING (public.is_admin());
+
 -- =============================================================
 -- DONE.
 --
