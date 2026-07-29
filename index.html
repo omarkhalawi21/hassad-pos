@@ -105,6 +105,7 @@ function emptyState() {
     devices: [], deviceCategories: [],                 // printers per branch + kitchen category filter
     posRoles: [], staffRoles: [],                      // named roles + [{staffId, roleId}] assignments
     reportCache: {},                                   // key "from|to|branch" → { orders, items, payments, shifts, movements }
+    dashCache: {},                                     // businessDate → { items, payments } for that day's completed orders (dashboard v2)
     orders: [],           // capped recent window (today + last 7 days)
     shifts: [],           // open shifts + last 7 days of closed ones
     shiftMovements: [],   // drawer movements for the loaded shifts window
@@ -1539,6 +1540,42 @@ async function printReceipt(orderId, mode = 'customer') {
 let reportState = { tab: 'sales', from: '', to: '', branch: 'all', category: 'all' };
 const _reportInflight = new Set();
 
+// Dashboard v2 needs order_items + order_payments for a day (payment mix + top
+// products) -- the 7-day `state.orders` bulk load carries neither. Fetch them
+// once per business date, cached in state.dashCache, guarded by an in-flight
+// set (mirrors loadReportRange). Orders themselves come from state.orders.
+const _dashInflight = new Set();
+function ymdAddDays(ymd, n) {
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d)); dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
+}
+async function loadDashData(date) {
+  if (state.dashCache[date] || _dashInflight.has(date)) return;
+  _dashInflight.add(date);
+  try {
+    const ids = state.orders.filter(o => o.businessDate === date && o.status === 'completed').map(o => o.id);
+    if (!ids.length) { state.dashCache[date] = { items: [], payments: [] }; return; }
+    const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+    const items = [], payments = [];
+    for (const c of chunk(ids, 200)) {
+      const [li, pa] = await Promise.all([
+        sb.from('order_items').select('*').in('order_id', c),
+        sb.from('order_payments').select('*').in('order_id', c),
+      ]);
+      items.push(...(li.data || []).map(mapOrderItemFromDb));
+      payments.push(...(pa.data || []).map(mapPaymentFromDb));
+    }
+    state.dashCache[date] = { items, payments };
+  } catch (e) {
+    console.error('Dashboard load failed:', e);
+    state.dashCache[date] = { items: [], payments: [], error: true };
+  } finally {
+    _dashInflight.delete(date);
+    if (getRoute() === 'dashboard') render();
+  }
+}
+
 function reportRangeKey() { return `${reportState.from}|${reportState.to}|${reportState.branch}`; }
 function setReportRange(preset) {
   const d = new Date(); const fmt = x => x.toISOString().slice(0, 10);
@@ -1828,15 +1865,108 @@ function csvCell(v) {
 /* -------------------- DASHBOARD -------------------- */
 function renderDashboard() {
   const today = todayISO();
+  const yst = ymdAddDays(today, -1);
+  loadDashData(today); // today's items + payments for payment mix + top products
   const done = state.orders.filter(o => o.status === 'completed');
   const todayOrders = done.filter(o => o.businessDate === today);
+  const ystOrders = done.filter(o => o.businessDate === yst);
   const returnedToday = state.orders.filter(o => o.status === 'returned' && o.businessDate === today);
   const sum = list => list.reduce((s, o) => s + o.total, 0);
+  const salesToday = sum(todayOrders), salesYst = sum(ystOrders);
+  const avg = todayOrders.length ? salesToday / todayOrders.length : 0;
   const discountsToday = todayOrders.reduce((s, o) => s + o.discountAmount, 0);
-  const avg = todayOrders.length ? sum(todayOrders) / todayOrders.length : 0;
+  const vatToday = todayOrders.reduce((s, o) => s + o.vatAmount, 0);
+  const cur = escapeHTML(state.settings.currency);
+  // Day-over-day delta chip vs yesterday.
+  const delta = (c, p) => {
+    if (p <= 0) return c > 0 ? '<span class="text-emerald-600 font-semibold">▲ new</span>' : '<span class="text-slate-400">—</span>';
+    const pct = Math.round((c - p) / p * 100);
+    if (pct === 0) return '<span class="text-slate-400">— flat</span>';
+    return pct > 0 ? `<span class="text-emerald-600 font-semibold">▲ ${pct}%</span>` : `<span class="text-rose-600 font-semibold">▼ ${Math.abs(pct)}%</span>`;
+  };
+  const stat = (label, value, sub) => `
+    <div class="bg-white rounded-2xl shadow-card p-4">
+      <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">${label}</div>
+      <div class="font-display text-2xl font-semibold text-slate-900 mt-1">${value}</div>
+      ${sub ? `<div class="text-xs text-slate-500 mt-1">${sub}</div>` : ''}
+    </div>`;
+  const stats = `
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
+      ${stat('Sales today', fmtMoney(salesToday) + ' ' + cur, `${todayOrders.length} orders · ${delta(salesToday, salesYst)}`)}
+      ${stat('Orders today', todayOrders.length, `${delta(todayOrders.length, ystOrders.length)} vs yesterday`)}
+      ${stat('Average ticket', fmtMoney(avg), 'today')}
+      ${stat('VAT today', fmtMoney(vatToday), 'collected')}
+      ${stat('Discounts today', fmtMoney(discountsToday), 'off completed')}
+      ${stat('Returns today', fmtMoney(sum(returnedToday)), `${returnedToday.length} order${returnedToday.length === 1 ? '' : 's'}`)}
+    </div>`;
+
+  // ---- Order type (today) ----
   const byType = Object.entries(ORDER_TYPES)
-    .map(([k, label]) => ({ label, n: todayOrders.filter(o => o.orderType === k).length }))
+    .map(([k, label]) => ({ label, n: todayOrders.filter(o => o.orderType === k).length, total: sum(todayOrders.filter(o => o.orderType === k)) }))
     .filter(x => x.n > 0);
+  const typeStrip = byType.length ? `
+    <div class="bg-white rounded-2xl shadow-card px-4 py-3 mb-5 flex items-center gap-3 flex-wrap text-sm">
+      <span class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Today by type</span>
+      ${byType.map(x => `<span class="badge badge-slate">${x.label} · ${x.n} · ${fmtMoney(x.total)}</span>`).join('')}
+    </div>` : '';
+
+  // ---- Sales by hour (today) -- the Foodics curve; peak highlighted. ----
+  const byHour = Array(24).fill(0);
+  todayOrders.forEach(o => { byHour[new Date(o.createdAt).getHours()] += o.total; });
+  const H_FROM = 6, H_TO = 23, hours = [];
+  for (let h = H_FROM; h <= H_TO; h++) hours.push(h);
+  const hMax = Math.max(1, ...hours.map(h => byHour[h]));
+  const peak = hours.reduce((p, h) => byHour[h] > byHour[p] ? h : p, H_FROM);
+  const hourLabel = h => (h % 12 || 12) + (h < 12 ? 'a' : 'p');
+  const hourly = `
+    <div class="bg-white rounded-2xl shadow-card p-5 mb-5">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-display font-semibold text-slate-900">Sales by hour · today</h3>
+        ${salesToday > 0 ? `<span class="text-xs text-slate-500">Peak <span class="font-semibold text-slate-700">${hourLabel(peak)}</span> · ${fmtMoney(byHour[peak])}</span>` : ''}
+      </div>
+      ${salesToday > 0 ? `<div class="flex items-end gap-1 h-40">
+        ${hours.map(h => `<div class="flex-1 flex flex-col items-center justify-end gap-1" title="${hourLabel(h)}: ${fmtMoney(byHour[h])}">
+          <div class="w-full rounded-t ${h === peak ? 'bg-brand-600' : 'bg-brand-300'}" style="height:${Math.round(byHour[h] / hMax * 100)}%; min-height:2px"></div>
+          <div class="text-[8px] text-slate-400">${h % 3 === 0 ? hourLabel(h) : ''}</div>
+        </div>`).join('')}
+      </div>` : '<div class="text-sm text-slate-400 text-center py-10">No sales yet today.</div>'}
+    </div>`;
+
+  // ---- Payment mix + top products (need today's items/payments) ----
+  const dash = state.dashCache[today];
+  const doneIdsToday = new Set(todayOrders.map(o => o.id));
+  const skel = '<div class="bg-white rounded-2xl shadow-card p-8 text-center"><div class="w-8 h-8 rounded-full border-4 border-brand-200 border-t-brand-700 animate-spin mx-auto"></div></div>';
+  let payMix = skel, topProducts = skel;
+  if (dash) {
+    const byMethod = {};
+    dash.payments.filter(p => doneIdsToday.has(p.orderId)).forEach(p => { byMethod[p.method] = (byMethod[p.method] || 0) + p.amount; });
+    const pmRows = Object.entries(byMethod).sort((a, b) => b[1] - a[1]);
+    const pmTotal = pmRows.reduce((s, [, v]) => s + v, 0);
+    payMix = `
+      <div class="bg-white rounded-2xl shadow-card p-5">
+        <h3 class="font-display font-semibold text-slate-900 mb-3">Payment mix · today</h3>
+        ${pmRows.length ? pmRows.map(([m, amt]) => { const pct = pmTotal ? Math.round(amt / pmTotal * 100) : 0; return `
+          <div class="mb-2.5">
+            <div class="flex items-center justify-between text-sm mb-1"><span class="font-medium text-slate-700">${escapeHTML(payMethodLabel(m))}</span><span class="tabular-nums text-slate-600">${fmtMoney(amt)} · ${pct}%</span></div>
+            <div class="h-2 bg-slate-100 rounded-full overflow-hidden"><div class="h-full bg-brand-500 rounded-full" style="width:${pct}%"></div></div>
+          </div>`; }).join('') : '<div class="text-sm text-slate-400 py-6 text-center">No payments yet today.</div>'}
+      </div>`;
+    const byItem = {};
+    dash.items.filter(l => doneIdsToday.has(l.orderId)).forEach(l => { const k = l.nameEn || '—'; (byItem[k] = byItem[k] || { name: l.nameEn, qty: 0, rev: 0 }); byItem[k].qty += l.qty; byItem[k].rev += l.lineTotal; });
+    const top = Object.values(byItem).sort((a, b) => b.qty - a.qty).slice(0, 8);
+    const tMax = Math.max(1, ...top.map(x => x.qty));
+    topProducts = `
+      <div class="bg-white rounded-2xl shadow-card p-5">
+        <h3 class="font-display font-semibold text-slate-900 mb-3">Top products · today</h3>
+        ${top.length ? top.map(x => `
+          <div class="mb-2.5">
+            <div class="flex items-center justify-between text-sm mb-1"><span class="font-medium text-slate-700 truncate pr-2">${escapeHTML(x.name)}</span><span class="tabular-nums text-slate-600 shrink-0">${x.qty} · ${fmtMoney(x.rev)}</span></div>
+            <div class="h-2 bg-slate-100 rounded-full overflow-hidden"><div class="h-full bg-emerald-500 rounded-full" style="width:${Math.round(x.qty / tMax * 100)}%"></div></div>
+          </div>`).join('') : '<div class="text-sm text-slate-400 py-6 text-center">No products sold yet today.</div>'}
+      </div>`;
+  }
+
+  // ---- By branch (today + 7d + till status) ----
   const byBranch = state.branches.filter(b => b.active).map(b => {
     const open = state.shifts.find(s => s.branchId === b.id && s.status === 'open');
     const lastClosed = state.shifts.find(s => s.branchId === b.id && s.status === 'closed');
@@ -1852,38 +1982,22 @@ function renderDashboard() {
           : '<span class="badge badge-slate">Never opened</span>',
     };
   });
-  const stat = (label, value, sub) => `
-    <div class="bg-white rounded-2xl shadow-card p-4">
-      <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">${label}</div>
-      <div class="font-display text-2xl font-semibold text-slate-900 mt-1">${value}</div>
-      ${sub ? `<div class="text-xs text-slate-500 mt-1">${sub}</div>` : ''}
-    </div>`;
-  return `
-    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
-      ${stat('Sales today', fmtMoney(sum(todayOrders)) + ' ' + escapeHTML(state.settings.currency), todayOrders.length + ' orders')}
-      ${stat('Average ticket', fmtMoney(avg), 'today')}
-      ${stat('Returns today', fmtMoney(sum(returnedToday)), returnedToday.length + ' order' + (returnedToday.length===1?'':'s'))}
-      ${stat('Discounts today', fmtMoney(discountsToday), 'off completed orders')}
-      ${stat('Sales — 7 days', fmtMoney(sum(done)), done.length + ' orders')}
-      ${stat('VAT — 7 days', fmtMoney(done.reduce((s,o) => s + o.vatAmount, 0)), 'from completed orders')}
-    </div>
-    ${byType.length ? `<div class="bg-white rounded-2xl shadow-card px-4 py-3 mb-5 flex items-center gap-3 flex-wrap text-sm">
-      <span class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Today by type</span>
-      ${byType.map(x => `<span class="badge badge-slate">${x.label} · ${x.n}</span>`).join('')}
-    </div>` : ''}
+  const branchTable = `
     <div class="bg-white rounded-2xl shadow-card overflow-hidden">
       <div class="px-5 py-4 border-b border-slate-100"><h3 class="font-display text-lg font-semibold text-slate-900">By branch</h3></div>
-      <table class="w-full text-sm">
+      <div class="overflow-x-auto"><table class="w-full text-sm">
         <thead><tr class="text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
-          <th class="text-start px-4 py-2.5">Branch</th><th class="text-start px-4 py-2.5">Till</th><th class="text-end px-4 py-2.5">Today</th><th class="text-end px-4 py-2.5">Orders today</th><th class="text-end px-4 py-2.5">7 days</th></tr></thead>
+          <th class="text-start px-4 py-2.5">Branch</th><th class="text-start px-4 py-2.5">Till</th><th class="text-end px-4 py-2.5">Today</th><th class="text-end px-4 py-2.5">Orders</th><th class="text-end px-4 py-2.5">7 days</th></tr></thead>
         <tbody class="divide-y divide-slate-100">
           ${byBranch.map(b => `<tr><td class="px-4 py-2.5 font-medium">${escapeHTML(b.name)}</td>
             <td class="px-4 py-2.5">${b.till}</td>
             <td class="px-4 py-2.5 text-end font-semibold">${fmtMoney(b.today)}</td>
             <td class="px-4 py-2.5 text-end">${b.n}</td>
             <td class="px-4 py-2.5 text-end text-slate-600">${fmtMoney(b.week)}</td></tr>`).join('')}
-        </tbody></table>
+        </tbody></table></div>
     </div>`;
+
+  return `${stats}${typeStrip}${hourly}<div class="grid lg:grid-cols-2 gap-5 mb-5">${payMix}${topProducts}</div>${branchTable}`;
 }
 
 /* -------------------- MENU ADMIN -------------------- */
