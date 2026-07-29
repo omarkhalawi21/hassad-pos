@@ -180,14 +180,17 @@ async function doDelete(p: any) {
 // branch.id / staff.id, which is exactly what the app sends in every op.
 async function doSyncBranches() {
   const db = admin();
-  const { data: branches, error } = await db.from("branches").select("id, name, name_ar, active");
+  const { data: branches, error } = await db.from("branches").select("id, name, name_ar, phone, active");
   if (error) return json({ error: error.message }, 500);
   const body = {
     branches: (branches || []).map((b: any) => ({
       integration_id: b.id,
       en_name: b.name || "",
       ar_name: b.name_ar || b.name || "",
-      phone_numbers: [],
+      // Koinz requires a non-empty phone per branch. Use the branch's real
+      // number; fall back to a placeholder only so one blank phone can't 400
+      // the whole sync -- set a real number in the Branches editor.
+      phone_numbers: [String(b.phone || "").trim() || "0500000000"],
       deleted_at: b.active === false ? new Date().toISOString() : null,
     })),
   };

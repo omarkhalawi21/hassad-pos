@@ -119,7 +119,7 @@ function mapSettingsFromDb(r) {
     vatRate: Number(r.vat_rate) || 15, receiptFooterEn: r.receipt_footer_en || '', receiptFooterAr: r.receipt_footer_ar || '',
     koinzEnabled: !!r.koinz_enabled };
 }
-function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active, hrBranch: r.hr_branch || '' }; }
+function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active, hrBranch: r.hr_branch || '', phone: r.phone || '' }; }
 function mapRecipeFromDb(r) { return { id: r.id, itemId: r.item_id, hrItemName: r.hr_item_name || '', qty: Number(r.qty) || 0, unit: r.unit || 'units' }; }
 function mapPayMethodFromDb(r) { return { id: r.id, name: r.name || '', code: r.code || '', active: !!r.active, sort: Number(r.sort_order) || 0 }; }
 // Fallback trio keeps checkout usable until SQL block 17 has been run.
@@ -2406,11 +2406,12 @@ function openBranchModal(id) {
     <div class="space-y-3">
       <div><label class="label">Name</label><input id="br-name" class="input" value="${escapeHTML(editing?.name || '')}" placeholder="e.g. KHOBAR"></div>
       <div><label class="label">Name (Arabic)</label><input id="br-ar" class="input" dir="rtl" value="${escapeHTML(editing?.nameAr || '')}"></div>
+      <div><label class="label">Phone</label><input id="br-phone" class="input" inputmode="tel" value="${escapeHTML(editing?.phone || '')}" placeholder="e.g. 0138xxxxxx"><p class="text-xs text-slate-400 mt-1">Required by Koinz loyalty to register the branch.</p></div>
       <div><label class="label">HR inventory branch</label><input id="br-hr" class="input" value="${escapeHTML(editing?.hrBranch || '')}" placeholder="Branch name as written in the Hassad app inventory">
         <p class="text-xs text-slate-400 mt-1">Used by the nightly inventory sync. Leave empty if it matches the POS name.</p></div>
       <div><label class="label">Active</label><select id="br-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
     </div>`, async () => {
-    const row = { name: $('#br-name').value.trim().toUpperCase(), name_ar: $('#br-ar').value.trim(), hr_branch: $('#br-hr').value.trim() || null, active: $('#br-active').value === '1' };
+    const row = { name: $('#br-name').value.trim().toUpperCase(), name_ar: $('#br-ar').value.trim(), phone: $('#br-phone').value.trim(), hr_branch: $('#br-hr').value.trim() || null, active: $('#br-active').value === '1' };
     if (!row.name) { toast('Name required', 'error'); return false; }
     const q = editing ? sb.from('branches').update(row).eq('id', editing.id) : sb.from('branches').insert(row);
     const { error } = await q;
