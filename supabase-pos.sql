@@ -1123,6 +1123,12 @@ DROP POLICY IF EXISTS "koinz_redemptions_delete" ON public.koinz_redemptions;
 CREATE POLICY "koinz_redemptions_delete" ON public.koinz_redemptions FOR DELETE TO authenticated
   USING (public.is_admin());
 
+-- 20. BRANCH PHONE (for Koinz branch sync)
+-- Koinz's /branches sync rejects a branch with no phone_numbers ("Missing or
+-- Invalid branch_integration_id" on add-points until the branch is registered).
+-- Store one contact number per branch; the koinz sync-branches action sends it.
+ALTER TABLE public.branches ADD COLUMN IF NOT EXISTS phone text NOT NULL DEFAULT '';
+
 -- =============================================================
 -- DONE.
 --
