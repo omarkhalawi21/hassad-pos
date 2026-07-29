@@ -2898,13 +2898,14 @@ async function koinzLoadStatus() {
 // branches + cashiers. Run this once (and after adding branches/staff).
 async function koinzSync() {
   toast('Syncing to Koinz…', 'info');
-  // Cashiers are the auth gate (Koinz's "Unauthorized cashier") -- sync those
-  // first and treat branch metadata as best-effort so a branch-side rejection
-  // (e.g. Koinz requiring branch phone numbers) never blocks the cashiers.
+  // Order matters: BRANCHES before CASHIERS. A cashier references its branch, so
+  // Koinz rejects cashiers with "Unauthorized cashier" if the branches don't
+  // exist yet. Branch push always runs first (placeholder phone keeps it from
+  // 400ing); the cashier sync is the auth gate that must succeed.
+  const b = await koinzInvoke('sync-branches', {});
   const c = await koinzInvoke('sync-cashiers', {});
   if (c.error || !c.ok) { toast('Cashier sync failed: ' + (c.error || c.message || ('HTTP ' + c.status)), 'error'); return; }
-  const b = await koinzInvoke('sync-branches', {});
-  if (b.error || !b.ok) { toast(`Synced ${c.count} cashiers ✓. Branches skipped: ${b.message || b.error || ('HTTP ' + b.status)}`, 'error'); return; }
+  if (b.error || !b.ok) { toast(`Synced ${c.count} cashiers ✓. Branches: ${b.message || b.error || ('HTTP ' + b.status)}`, 'error'); return; }
   toast(`Synced ${b.count} branches + ${c.count} cashiers to Koinz`, 'success');
 }
 
