@@ -2897,10 +2897,13 @@ async function koinzLoadStatus() {
 // branches + cashiers. Run this once (and after adding branches/staff).
 async function koinzSync() {
   toast('Syncing to Koinz…', 'info');
-  const b = await koinzInvoke('sync-branches', {});
-  if (b.error || !b.ok) { toast('Branch sync failed: ' + (b.error || b.message || ('HTTP ' + b.status)), 'error'); return; }
+  // Cashiers are the auth gate (Koinz's "Unauthorized cashier") -- sync those
+  // first and treat branch metadata as best-effort so a branch-side rejection
+  // (e.g. Koinz requiring branch phone numbers) never blocks the cashiers.
   const c = await koinzInvoke('sync-cashiers', {});
   if (c.error || !c.ok) { toast('Cashier sync failed: ' + (c.error || c.message || ('HTTP ' + c.status)), 'error'); return; }
+  const b = await koinzInvoke('sync-branches', {});
+  if (b.error || !b.ok) { toast(`Synced ${c.count} cashiers ✓. Branches skipped: ${b.message || b.error || ('HTTP ' + b.status)}`, 'error'); return; }
   toast(`Synced ${b.count} branches + ${c.count} cashiers to Koinz`, 'success');
 }
 
