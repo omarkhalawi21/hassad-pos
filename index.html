@@ -1249,6 +1249,11 @@ async function saveOrder() {
     shift_id: shift.id, note: posOrderNote || null,
     terminal: localStorage.getItem('posTerminal') || null };
 
+  // Reserve the receipt window NOW, while we are still inside the click on
+  // "Complete order". Everything below this line awaits the network, and Safari
+  // refuses window.open() once that has happened.
+  const printWin = reservePrintWindow();
+
   // Insert; the DB trigger assigns order_no. Concurrent cashiers on one
   // branch can collide on the unique (branch, date, no) — retry once.
   let order = null;
@@ -1256,17 +1261,18 @@ async function saveOrder() {
     const { data, error } = await sb.from('orders').insert(orderRow).select().single();
     if (error) {
       if (error.code === '23505' && attempt === 0) continue;
+      releasePrintWindow(printWin);
       toast(humanizeError(error), 'error'); return false;
     }
     order = data;
   }
-  if (!order) { toast('Could not save the order — try again', 'error'); return false; }
+  if (!order) { releasePrintWindow(printWin); toast('Could not save the order — try again', 'error'); return false; }
 
   const lineRows = posCart.map(l => ({ order_id: order.id, item_id: l.itemId, name_en: l.nameEn, name_ar: l.nameAr,
     unit_price: +l.unitPrice.toFixed(2), qty: l.qty, line_total: +(l.unitPrice * l.qty).toFixed(2),
     modifiers: l.modifiers?.length ? l.modifiers : null }));
   const { error: liErr } = await sb.from('order_items').insert(lineRows);
-  if (liErr) { await sb.from('orders').delete().eq('id', order.id); toast(humanizeError(liErr), 'error'); return false; }
+  if (liErr) { await sb.from('orders').delete().eq('id', order.id); releasePrintWindow(printWin); toast(humanizeError(liErr), 'error'); return false; }
   const { error: payErr } = await sb.from('order_payments').insert(payments.map(p => ({ ...p, order_id: order.id })));
   if (payErr) { toast('Order saved but payment record failed: ' + humanizeError(payErr), 'error'); }
 
@@ -1277,7 +1283,7 @@ async function saveOrder() {
   render();
   toast(`Order #${mapped.orderNo} completed`, 'success');
   broadcastPaid(mapped); // thank-you screen on the customer display
-  printReceipt(mapped.id, 'both'); // customer receipt + bar ticket, in order
+  printReceipt(mapped.id, 'both', printWin); // customer receipt + bar ticket, in order
   // Koinz points prompt — after the receipt fires (print popup spawns first).
   if (koinzEnabled()) setTimeout(() => openKoinzGrantModal(mapped), 300);
   return true;
@@ -1367,14 +1373,37 @@ function zatcaQrDataUrl(order) {
     return qr.createDataURL(4, 8);
   } catch (e) { console.error('ZATCA QR failed:', e); return ''; }
 }
-// Blob-URL popup — document.write into about:blank saves BLANK PDFs in
-// Safari (HR app PR #156 lesson).
-function openPrintWindow(html) {
+// Safari — iOS especially — only honours window.open() inside the synchronous
+// turn of the user gesture that triggered it. Both print paths need a network
+// round-trip before the ticket HTML exists, so the window is RESERVED on the
+// tap and filled once the HTML is ready. Opening it after the await is what got
+// the popup blocked on the iPad.
+function reservePrintWindow() {
+  const w = window.open('', '_blank');
+  if (!w) return null; // blocked — fillPrintWindow retries and reports once
+  // Placeholder only: this is replaced before anything prints. Never PRINT a
+  // document.write()n page — Safari saves those as blank PDFs (HR app PR #156).
+  try {
+    w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt</title></head>'
+      + '<body style="font:15px -apple-system,system-ui,sans-serif;color:#555;padding:28px">Preparing receipt…</body></html>');
+    w.document.close();
+  } catch (_) { /* harmless: the navigation below still lands */ }
+  return w;
+}
+// Point a reserved window at the real ticket. Falls back to opening directly
+// for any caller that could not reserve one — that still works on desktop.
+function fillPrintWindow(w, html) {
   const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-  const w = window.open(url, '_blank');
-  if (!w) toast('Popup blocked — allow popups to print receipts', 'error');
+  if (w && !w.closed) {
+    w.location.replace(url);
+  } else {
+    const nw = window.open(url, '_blank');
+    if (!nw) toast('Popup blocked — allow popups to print receipts', 'error');
+  }
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
+// Drop a reserved window when the thing it was opened for never happened.
+function releasePrintWindow(w) { try { if (w && !w.closed) w.close(); } catch (_) {} }
 // mode: 'customer' (ZATCA receipt), 'bar' (kitchen/bar ticket, no prices),
 // or 'both' — one print job, customer copy then a page-break (= cut on
 // thermal roll printers) then the bar ticket. Their branch has ONE
@@ -1390,9 +1419,13 @@ function rcDateTime(d){return rcDate(d)+' '+rcTime(d);}
 // Stable 6-digit check number derived from the order id (Foodics shows a
 // global check# separate from the per-day order#).
 function rcCheckNo(id){let h=0;for(const c of String(id))h=(h*31+c.charCodeAt(0))>>>0;return String(h%1000000).padStart(6,'0');}
-async function printReceipt(orderId, mode = 'customer') {
+async function printReceipt(orderId, mode = 'customer', reserved) {
+  // MUST run before anything else: the reservation has to happen in the same
+  // synchronous turn as the tap. Callers that already awaited (checkout) pass
+  // in a window they reserved themselves.
+  const printWin = reserved !== undefined ? reserved : reservePrintWindow();
   const order = state.orders.find(o => o.id === orderId);
-  if (!order) return;
+  if (!order) { releasePrintWindow(printWin); return; }
   const detail = await loadOrderDetail(orderId);
   const s = state.settings;
   const qrUrl = zatcaQrDataUrl(order);
@@ -1535,7 +1568,7 @@ async function printReceipt(orderId, mode = 'customer') {
       }, 150);
     <\/script>
   </body></html>`;
-  openPrintWindow(html);
+  fillPrintWindow(printWin, html);
 }
 
 /* -------------------- REPORTS -------------------- */
