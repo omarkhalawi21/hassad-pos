@@ -173,6 +173,36 @@ async function doDelete(p: any) {
   return json({ ok: status === 200, status, message: status === 200 ? "" : (raw || "").slice(0, 200) }, 200);
 }
 
+// revoke -> called on void/return: delete this order's points operation on
+// Koinz (if it was sent) and neutralise the local rows so a later flush can
+// never resend them. Runs here (service role) because cashiers may hold the
+// void permission but have no UPDATE right on koinz_operations.
+async function doRevoke(p: any) {
+  if (!p.order_id) return json({ error: "order_id is required" }, 400);
+  const db = admin();
+  const { data: ops, error } = await db.from("koinz_operations")
+    .select("operation_id, status")
+    .eq("order_id", p.order_id);
+  if (error) return json({ error: error.message }, 500);
+  let deleted = 0, cancelled = 0, failed = 0;
+  for (const op of ops || []) {
+    if (op.status === "synced") {
+      const { status } = await koinz("/api/pos/v2.1/delete-points-operation", {
+        operation_integration_id: op.operation_id,
+      });
+      if (status !== 200) { failed++; continue; } // leave it synced; voiding again retries
+      deleted++;
+    } else {
+      cancelled++; // pending/failed: never sent (or dead) -- just neutralise
+    }
+    await db.from("koinz_operations").update({
+      status: "failed", should_retry: false,
+      last_error: "revoked: order voided/returned",
+    }).eq("operation_id", op.operation_id);
+  }
+  return json({ ok: failed === 0, deleted, cancelled, failed });
+}
+
 // ---- sync branches / cashiers -----------------------------------------------
 // Koinz must know our branches + cashiers (by OUR ids) before it will authorise
 // points/validate/redeem -- otherwise it returns 401 "Unauthorized cashier".
@@ -232,6 +262,7 @@ Deno.serve(async (req) => {
       case "validate":      return await doValidate(p);
       case "redeem":        return await doRedeem(p);
       case "delete":        return await doDelete(p);
+      case "revoke":        return await doRevoke(p);
       case "sync-branches": return await doSyncBranches();
       case "sync-cashiers": return await doSyncCashiers();
       default:              return json({ error: `Unknown action: ${action}` }, 400);

@@ -1326,6 +1326,7 @@ async function voidOrder(orderId) {
   const o = state.orders.find(x => x.id === orderId);
   if (o) { o.status = 'void'; o.voidReason = reason.trim(); }
   render(); toast('Order voided', 'success');
+  koinzRevoke(orderId);
 }
 async function returnOrder(orderId) {
   const o = state.orders.find(x => x.id === orderId);
@@ -1340,6 +1341,7 @@ async function returnOrder(orderId) {
   if (error) { toast(humanizeError(error), 'error'); return; }
   o.status = 'returned'; o.voidReason = reason.trim(); o.returnedAt = new Date().toISOString();
   render(); toast(`Order #${o.orderNo} returned — refund ${fmtMoney(o.total)} to the customer`, 'success');
+  koinzRevoke(orderId);
 }
 
 /* -------------------- RECEIPT + ZATCA QR -------------------- */
@@ -2983,6 +2985,22 @@ async function koinzInvoke(action, body) {
     }
     return data || {};
   } catch (e) { return { ok: false, error: e.message || String(e) }; }
+}
+
+// Void/return: pull this order's granted points back from Koinz. Runs in the
+// Edge Function (service role) so it works for cashiers too; fire-and-forget
+// after the local void/return already succeeded.
+async function koinzRevoke(orderId) {
+  if (!koinzEnabled()) return;
+  const res = await koinzInvoke('revoke', { order_id: orderId });
+  if (res.error) {
+    const stale = /unknown action/i.test(res.error);
+    toast(stale ? 'Koinz: points NOT removed — the koinz function needs redeploying' : ('Koinz: points not removed — ' + res.error), 'error');
+  } else if (res.failed) {
+    toast('Koinz: points removal failed — void again to retry', 'error');
+  } else if (res.deleted) {
+    toast('Koinz points removed', 'success');
+  } // deleted 0 + cancelled 0 = order had no points op — nothing to say
 }
 
 // Send every owed points op. Silent when called after a grant; notify=true
