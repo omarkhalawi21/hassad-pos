@@ -2457,7 +2457,7 @@ function renderDevices() {
         </div>
       </div>`;
     }).join('')}
-    <p class="text-xs text-slate-500">The kitchen/bar printer's order types and categories decide when a bar ticket prints and which items appear on it — e.g. switch EMPLOYEE COFFEE off and staff drinks stop printing tickets. Direct printing to the Epson IPs is set up during the on-site printer test; until then jobs go through the browser's print dialog.</p>`;
+    <p class="text-xs text-slate-500">The kitchen/bar printer's order types and categories decide when a bar ticket prints and which items appear on it — e.g. switch EMPLOYEE COFFEE off and staff drinks stop printing tickets. Every job goes through the browser's print dialog — AirPrint on an iPad. Direct printing straight to a printer's IP is <strong>not</strong> built: the app is served over HTTPS and the printers speak plain HTTP, which browsers block, so it would need either a certificate on the printer or a small bridge on the counter. The IP field below is a label for your own reference; nothing sends to it.</p>`;
 }
 function openDeviceModal(id) {
   const editing = id ? state.devices.find(d => d.id === id) : null;
