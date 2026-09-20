@@ -6,9 +6,20 @@
 # Idempotent — re-running a date never double-deducts.
 #
 # Secrets required (Repo → Settings → Secrets and variables → Actions):
-#   SUPABASE_DB_URL – POS DB, session-pooler URI (already set for backups)
-#   HR_DB_URL       – HR DB, session-pooler URI (same value as the HR
-#                     repo's SUPABASE_DB_URL backup secret)
+#   SUPABASE_DB_URL - POS DB, SESSION POOLER URI (already set for backups)
+#   HR_DB_URL       - HR DB, SESSION POOLER URI (the HR project's own)
+#
+# BOTH must be the session pooler on port 5432:
+#   postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres
+# The direct host db.<ref>.supabase.co is IPv6-ONLY and GitHub runners have
+# no IPv6 -- it fails with ENETUNREACH on every run. This workflow failed
+# 60 nights in a row on exactly that before anyone noticed.
+#
+# The validation step below fails closed on a malformed URI BEFORE it can
+# reach the network. That is deliberate: this repo is public, and a bad URI
+# shifts the password into the host/user field, where the connection error
+# echoes it into the log verbatim (GitHub only masks exact secret matches,
+# not fragments). That has forced a password rotation three times.
 
 name: Inventory sync
 
@@ -39,9 +50,83 @@ jobs:
       - name: Install pg client library
         run: npm install --no-save pg@8
 
-      - name: Run sync
+      - name: Validate connection strings
         env:
           POS_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           HR_DB_URL: ${{ secrets.HR_DB_URL }}
+        run: |
+          set -euo pipefail
+
+          # Validates one connection string. Prints ONLY yes/no facts --
+          # never any fragment of the value, because this repo is public.
+          check() {
+            NAME="$1"; RAW="$2"
+
+            if [ -z "${RAW:-}" ]; then
+              echo "::error::${NAME} secret is not set. Add it under Repo -> Settings -> Secrets and variables -> Actions."
+              exit 1
+            fi
+
+            # Normalise the usual paste damage: the Supabase Connect panel
+            # hands out a full `psql '...'` command, and quotes/newlines ride along.
+            CLEAN="$(printf '%s' "$RAW" | tr -d '\r\n')"
+            CLEAN="${CLEAN#psql }"
+            CLEAN="${CLEAN#\'}"; CLEAN="${CLEAN%\'}"
+            CLEAN="${CLEAN#\"}"; CLEAN="${CLEAN%\"}"
+            while [ "${CLEAN# }" != "$CLEAN" ]; do CLEAN="${CLEAN# }"; done
+            while [ "${CLEAN% }" != "$CLEAN" ]; do CLEAN="${CLEAN% }"; done
+
+            has() { case "$CLEAN" in *"$1"*) echo yes;; *) echo no;; esac; }
+
+            case "$CLEAN" in
+              postgresql://*|postgres://*) : ;;
+              *)
+                echo "::error::${NAME} is not a postgresql:// URI even after cleanup. Diagnostics: length=${#CLEAN}, contains_supabase_host=$(has supabase.co), contains_pooler=$(has pooler.supabase.com), contains_space=$(has ' '), contains_placeholder_brackets=$(has '['). Re-copy ONLY the URI from Supabase -> Connect -> Session pooler."
+                exit 1 ;;
+            esac
+
+            if printf '%s' "$CLEAN" | grep -q '\[YOUR-PASSWORD\]'; then
+              echo "::error::${NAME} still contains the [YOUR-PASSWORD] placeholder. Replace it (brackets included) with the real database password."
+              exit 1
+            fi
+
+            # The direct host is IPv6-only; GitHub runners cannot reach it.
+            if printf '%s' "$CLEAN" | grep -Eq '@db\.[A-Za-z0-9]+\.supabase\.co'; then
+              echo "::error::${NAME} is the DIRECT connection (db.<ref>.supabase.co). That host is IPv6-only and unreachable from GitHub runners -- it fails with ENETUNREACH every time. Use Supabase -> Connect -> Session pooler instead: postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres"
+              exit 1
+            fi
+
+            if printf '%s' "$CLEAN" | grep -q ':6543'; then
+              echo "::error::${NAME} is the TRANSACTION pooler (port 6543). This sync needs the SESSION pooler on port 5432."
+              exit 1
+            fi
+
+            # Exact expected shape. A missing colon or a stray word past
+            # /postgres is what leaked the password on 2026-09-20; both
+            # die here now, before any packet leaves the runner.
+            if ! printf '%s' "$CLEAN" | grep -Eq '^postgres(ql)?://postgres\.[A-Za-z0-9]+:[^@ /]+@[A-Za-z0-9.-]*pooler\.supabase\.com:5432/postgres(\?[A-Za-z0-9=&_.-]*)?$'; then
+              AT_COUNT=$(printf '%s' "$CLEAN" | tr -cd '@' | wc -c | tr -d ' ')
+              echo "::error::${NAME} parses as a URI but not the expected session-pooler shape (postgresql colon-slash-slash postgres DOT ref COLON password AT aws-0-region DOT pooler.supabase.com COLON 5432 slash postgres). Diagnostics: at_signs=${AT_COUNT}, has_colon_after_user=$(case "$CLEAN" in postgres*://postgres.*:*) echo yes;; *) echo no;; esac), has_pooler_host=$(has pooler.supabase.com), has_port_5432=$(has :5432), ends_with_db_postgres=$(case "$CLEAN" in */postgres|*/postgres\?*) echo yes;; *) echo no;; esac), has_space=$(has ' '), length=${#CLEAN}"
+              exit 1
+            fi
+
+            # Every % must begin a valid %XX escape, or libpq echoes the
+            # malformed token -- password included -- into the log.
+            if printf '%s' "$CLEAN" | grep -q '%' && printf '%s' "$CLEAN" | grep -Eq '%([^0-9A-Fa-f]|[0-9A-Fa-f][^0-9A-Fa-f]|$)'; then
+              echo "::error::${NAME} contains a percent sign that is not a valid %XX escape (use %40 for @, %3A for :, %2F for /, %23 for #). Fix the encoded password, or reset the DB password to plain letters and numbers."
+              exit 1
+            fi
+
+            echo "${NAME}: shape OK (session pooler, port 5432)."
+            echo "${NAME}_CLEAN=$CLEAN" >> "$GITHUB_ENV"
+          }
+
+          check POS_DB_URL "${POS_DB_URL:-}"
+          check HR_DB_URL  "${HR_DB_URL:-}"
+
+      - name: Run sync
+        env:
+          POS_DB_URL: ${{ env.POS_DB_URL_CLEAN }}
+          HR_DB_URL: ${{ env.HR_DB_URL_CLEAN }}
           SYNC_DATE: ${{ inputs.date }}
         run: node scripts/inventory-sync.mjs
