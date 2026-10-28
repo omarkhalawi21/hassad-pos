@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; object-src 'none'; connect-src 'self' https://*.supabase.co; base-uri 'self'; form-action 'none';" />
+<title>Order from Hassad</title>
+<meta name="theme-color" content="#df3247" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  /* Deliberately NOT tailwind.css: that file is built by scanning index.html,
+     so any class used only here would silently not compile. A customer page
+     also has no business downloading the back office's stylesheet. */
+  :root { --brand:#df3247; --brand-dark:#c02337; --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --bg:#faf7f2; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:Inter,system-ui,sans-serif; padding-bottom:env(safe-area-inset-bottom); }
+  body[dir="rtl"] { font-family:Cairo,Inter,system-ui,sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; padding:0 16px 120px; }
+  header { background:var(--brand); color:#fff; padding:14px 16px calc(14px + env(safe-area-inset-top)); position:sticky; top:0; z-index:20; }
+  .hrow { max-width:720px; margin:0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .brand { font-weight:700; font-size:1.05rem; letter-spacing:.01em; }
+  .langbtn { background:rgba(255,255,255,.18); color:#fff; border:0; border-radius:999px; padding:6px 14px; font:inherit; font-size:.8rem; font-weight:600; cursor:pointer; }
+  h1 { font-size:1.25rem; margin:22px 0 4px; }
+  .sub { color:var(--muted); font-size:.88rem; margin:0 0 18px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:12px; }
+  .branch { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; text-align:start; background:#fff; border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:12px; font:inherit; color:inherit; cursor:pointer; }
+  .branch:disabled { opacity:.55; cursor:not-allowed; }
+  .bname { font-weight:600; }
+  .pill { font-size:.72rem; font-weight:600; border-radius:999px; padding:3px 10px; white-space:nowrap; }
+  .pill.open { background:#d1fae5; color:#047857; } .pill.shut { background:#f1f5f9; color:#475569; }
+  .chips { display:flex; gap:8px; overflow-x:auto; padding:12px 0; position:sticky; top:52px; background:var(--bg); z-index:10; scrollbar-width:none; }
+  .chips::-webkit-scrollbar { display:none; }
+  .chip { flex:0 0 auto; border:1px solid var(--line); background:#fff; border-radius:999px; padding:7px 15px; font:inherit; font-size:.84rem; font-weight:600; color:var(--muted); cursor:pointer; }
+  .chip.on { background:var(--brand); border-color:var(--brand); color:#fff; }
+  .items { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:420px) { .items { grid-template-columns:1fr; } }
+  .item { background:#fff; border:1px solid var(--line); border-radius:16px; overflow:hidden; text-align:start; font:inherit; color:inherit; cursor:pointer; padding:0; display:flex; flex-direction:column; }
+  .item img { width:100%; aspect-ratio:1/1; object-fit:cover; background:#f1f5f9; display:block; }
+  .noimg { width:100%; aspect-ratio:1/1; background:linear-gradient(135deg,#f8e8ea,#f1f5f9); }
+  .ibody { padding:10px 12px 12px; display:flex; flex-direction:column; gap:4px; flex:1; }
+  .iname { font-weight:600; font-size:.9rem; line-height:1.3; }
+  .iar { font-size:.8rem; color:var(--muted); }
+  .iprice { margin-top:auto; font-weight:700; color:var(--brand); font-size:.92rem; }
+  .bar { position:fixed; inset-inline:0; bottom:0; background:#fff; border-top:1px solid var(--line); padding:12px 16px calc(12px + env(safe-area-inset-bottom)); z-index:30; }
+  .barin { max-width:720px; margin:0 auto; display:flex; gap:12px; align-items:center; }
+  .btn { flex:1; background:var(--brand); color:#fff; border:0; border-radius:14px; padding:14px 18px; font:inherit; font-weight:700; cursor:pointer; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn.ghost { background:#fff; color:var(--ink); border:1px solid var(--line); flex:0 0 auto; }
+  .sheet { position:fixed; inset:0; background:rgba(15,23,42,.45); display:flex; align-items:flex-end; justify-content:center; z-index:50; }
+  .sheetin { background:#fff; width:100%; max-width:720px; border-radius:20px 20px 0 0; padding:20px 16px calc(20px + env(safe-area-inset-bottom)); max-height:85vh; overflow:auto; }
+  .opt { display:flex; align-items:center; gap:10px; padding:11px 0; border-bottom:1px solid #f1f5f9; cursor:pointer; }
+  .opt input { width:20px; height:20px; accent-color:var(--brand); }
+  .grp { margin-top:14px; }
+  .grphead { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:2px; }
+  .grpname { font-weight:700; font-size:.95rem; }
+  .req { font-size:.7rem; font-weight:700; color:var(--brand); text-transform:uppercase; letter-spacing:.05em; }
+  .line { display:flex; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid #f1f5f9; }
+  .line:last-child { border-bottom:0; }
+  .qty { display:flex; align-items:center; gap:10px; }
+  .qbtn { width:30px; height:30px; border-radius:9px; border:1px solid var(--line); background:#fff; font:inherit; font-weight:700; cursor:pointer; color:var(--ink); }
+  .label { display:block; font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:14px 0 5px; }
+  .input { width:100%; padding:13px 14px; border:1px solid var(--line); border-radius:12px; font:inherit; font-size:1rem; background:#fff; }
+  .input:focus { outline:2px solid #df324744; border-color:#e75f70; }
+  .err { background:#fef2f2; border:1px solid #fecaca; color:#b91c1c; border-radius:12px; padding:11px 14px; font-size:.86rem; margin:12px 0; }
+  .tot { display:flex; justify-content:space-between; font-weight:700; font-size:1.05rem; padding-top:12px; }
+  .vat { display:flex; justify-content:space-between; color:var(--muted); font-size:.8rem; }
+  .big { font-size:2.6rem; font-weight:700; color:var(--brand); line-height:1; margin:6px 0; }
+  .step { display:flex; gap:12px; padding:12px 0; align-items:flex-start; }
+  .dot { width:11px; height:11px; border-radius:50%; background:var(--line); margin-top:5px; flex:0 0 auto; }
+  .step.on .dot { background:var(--brand); } .step.on .stext { font-weight:600; }
+  .stext { font-size:.92rem; } .smut { color:var(--muted); font-size:.8rem; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  .center { text-align:center; }
+  a.link { color:var(--brand); font-weight:600; }
+</style>
+</head>
+<body>
+<header><div class="hrow">
+  <span class="brand" id="hdr">Hassad Coffee</span>
+  <button class="langbtn" id="lang" type="button">العربية</button>
+</div></header>
+<div class="wrap" id="app"></div>
+<div id="bar"></div>
+<div id="sheet"></div>
+
+<script>
+const SUPABASE_URL = 'https://lqfardjkvoyzutsqlfco.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_yyu7cVkXy4ZgWXkqimNz4Q_1gPguJ90';
+const FN = SUPABASE_URL + '/functions/v1/order-intake';
+
+// ---- tiny i18n. The menu itself is already bilingual in the database, so
+// this only covers the page's own words.
+const T = {
+  en: { pick:'Where are you collecting from?', pickSub:'Order ahead and collect at the counter.',
+    open:'Open', shut:'Closed', closedNow:'Closed right now', menu:'Menu', cart:'Basket', empty:'Your basket is empty.',
+    add:'Add to basket', total:'Total', inclVat:'includes VAT', checkout:'Checkout', back:'Back',
+    name:'Your name', phone:'Mobile number', note:'Anything we should know? (optional)',
+    place:'Place order', placing:'Placing...', yourOrder:'Your order', orderNo:'Order',
+    ready:'We will have it ready in about', mins:'minutes', track:'Track this order', newOrder:'Order again',
+    st_pending:'Sent to the branch', st_accepted:'Accepted - being made', st_ready:'Ready for collection',
+    st_completed:'Collected', st_rejected:'Could not be accepted', unavailable:'Online ordering is closed right now.',
+    phoneHint:'05xxxxxxxx', required:'Choose one', upto:'Choose up to', loading:'Loading...', retry:'Try again',
+    collectAt:'Collect at', showThis:'Show this number at the counter.' },
+  ar: { pick:'من أي فرع تستلم طلبك؟', pickSub:'اطلب الآن واستلم من الكاونتر.',
+    open:'مفتوح', shut:'مغلق', closedNow:'مغلق حالياً', menu:'القائمة', cart:'السلة', empty:'سلتك فارغة.',
+    add:'أضف إلى السلة', total:'الإجمالي', inclVat:'شامل ضريبة القيمة المضافة', checkout:'إتمام الطلب', back:'رجوع',
+    name:'الاسم', phone:'رقم الجوال', note:'هل من ملاحظة؟ (اختياري)',
+    place:'إرسال الطلب', placing:'جاري الإرسال...', yourOrder:'طلبك', orderNo:'طلب رقم',
+    ready:'سيكون جاهزاً خلال', mins:'دقيقة', track:'تتبع الطلب', newOrder:'اطلب مرة أخرى',
+    st_pending:'تم الإرسال للفرع', st_accepted:'تم القبول - قيد التحضير', st_ready:'جاهز للاستلام',
+    st_completed:'تم الاستلام', st_rejected:'تعذر قبول الطلب', unavailable:'الطلب الإلكتروني مغلق حالياً.',
+    phoneHint:'05xxxxxxxx', required:'اختر واحداً', upto:'اختر حتى', loading:'جاري التحميل...', retry:'حاول مرة أخرى',
+    collectAt:'الاستلام من', showThis:'أظهر هذا الرقم عند الكاونتر.' },
+};
+let lang = localStorage.getItem('hassadLang') || 'en';
+const t = (k) => T[lang][k] || k;
+const nm = (o) => (lang === 'ar' && o.name_ar) ? o.name_ar : o.name_en;
+
+const S = { view:'branches', branches:[], branch:null, menu:null, cart:[], err:'', busy:false, track:null, picking:null, sel:{} };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+const money = (n) => Number(n).toFixed(2);
+
+async function api(action, payload) {
+  const res = await fetch(FN, {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', apikey:SUPABASE_KEY, Authorization:'Bearer ' + SUPABASE_KEY },
+    body: JSON.stringify({ action, ...(payload || {}) }),
+  });
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* non-JSON */ }
+  if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || 'Something went wrong. Please try again.');
+  return data;
+}
+
+/* ---------------- cart ---------------- */
+// A line is keyed by item + the exact set of chosen options, so "Latte with
+// oat" and "Latte with low fat" stack separately but identical ones merge.
+const lineKey = (itemId, optIds) => itemId + '|' + [...optIds].sort().join(',');
+function addToCart(item, optIds) {
+  const opts = (S.menu.modifierOptions || []).filter((o) => optIds.includes(o.id));
+  const unit = Number(item.price) + opts.reduce((s, o) => s + Number(o.price_delta || 0), 0);
+  const key = lineKey(item.id, optIds);
+  const found = S.cart.find((l) => l.key === key);
+  if (found) found.qty += 1;
+  else S.cart.push({ key, itemId:item.id, item, optIds:[...optIds], opts, unit, qty:1 });
+}
+const cartTotal = () => S.cart.reduce((s, l) => s + l.unit * l.qty, 0);
+const cartCount = () => S.cart.reduce((s, l) => s + l.qty, 0);
+
+/* ---------------- views ---------------- */
+function viewBranches() {
+  if (!S.branches.length) return `<h1>${t('unavailable')}</h1>`;
+  return `<h1>${t('pick')}</h1><p class="sub">${t('pickSub')}</p>` + S.branches.map((b) => `
+    <button class="branch" ${b.open ? '' : 'disabled'} data-branch="${esc(b.id)}">
+      <span><span class="bname">${esc(nm(b))}</span>${b.open ? '' : `<br><span class="muted">${t('closedNow')}</span>`}</span>
+      <span class="pill ${b.open ? 'open' : 'shut'}">${b.open ? t('open') : t('shut')}</span>
+    </button>`).join('');
+}
+
+function viewMenu() {
+  const m = S.menu;
+  if (!m.items.length) return `<h1>${t('unavailable')}</h1>`;
+  const cats = m.categories;
+  const active = S.cat || (cats[0] && cats[0].id);
+  const items = m.items.filter((i) => i.category_id === active);
+  return `
+    <div class="chips">${cats.map((c) => `<button class="chip ${c.id === active ? 'on' : ''}" data-cat="${esc(c.id)}">${esc(nm(c))}</button>`).join('')}</div>
+    <div class="items">${items.map((i) => `
+      <button class="item" data-item="${esc(i.id)}">
+        ${i.photo ? `<img src="${esc(i.photo)}" alt="" loading="lazy">` : '<div class="noimg"></div>'}
+        <span class="ibody">
+          <span class="iname">${esc(i.name_en)}</span>
+          ${i.name_ar ? `<span class="iar" dir="rtl">${esc(i.name_ar)}</span>` : ''}
+          <span class="iprice">${money(i.price)}</span>
+        </span>
+      </button>`).join('')}</div>`;
+}
+
+function viewCart() {
+  if (!S.cart.length) return `<h1>${t('cart')}</h1><p class="sub">${t('empty')}</p>`;
+  const total = cartTotal();
+  return `<h1>${t('cart')}</h1><div class="card">
+    ${S.cart.map((l, idx) => `<div class="line">
+      <span style="flex:1">
+        <span style="font-weight:600">${esc(nm(l.item))}</span>
+        ${l.opts.length ? `<br><span class="muted">${l.opts.map((o) => esc(nm(o))).join(' · ')}</span>` : ''}
+      </span>
+      <span class="qty">
+        <button class="qbtn" data-dec="${idx}" type="button">-</button>
+        <span style="min-width:18px;text-align:center;font-weight:600">${l.qty}</span>
+        <button class="qbtn" data-inc="${idx}" type="button">+</button>
+      </span>
+      <span style="min-width:62px;text-align:end;font-weight:700">${money(l.unit * l.qty)}</span>
+    </div>`).join('')}
+    <div class="tot"><span>${t('total')}</span><span>${money(total)}</span></div>
+    <div class="vat"><span>${t('inclVat')}</span><span></span></div>
+  </div>`;
+}
+
+function viewCheckout() {
+  return `<h1>${t('checkout')}</h1>
+    <p class="sub">${t('collectAt')} ${esc(nm(S.branch))} · ${money(cartTotal())}</p>
+    ${S.err ? `<div class="err">${esc(S.err)}</div>` : ''}
+    <div class="card">
+      <label class="label" for="f-name">${t('name')}</label>
+      <input class="input" id="f-name" autocomplete="name" maxlength="80" value="${esc(localStorage.getItem('hassadName') || '')}">
+      <label class="label" for="f-phone">${t('phone')}</label>
+      <input class="input" id="f-phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="${t('phoneHint')}" maxlength="14" value="${esc(localStorage.getItem('hassadPhone') || '')}">
+      <label class="label" for="f-note">${t('note')}</label>
+      <input class="input" id="f-note" maxlength="300">
+    </div>`;
+}
+
+function viewDone() {
+  const d = S.done;
+  return `<div class="center" style="padding-top:26px">
+    <p class="sub" style="margin-bottom:0">${t('orderNo')}</p>
+    <div class="big">#${esc(d.order_no)}</div>
+    <p class="muted">${t('showThis')}</p>
+    <div class="card" style="margin-top:20px;text-align:start">
+      <div class="line"><span style="flex:1">${t('collectAt')}</span><span style="font-weight:600">${esc(d.branch)}</span></div>
+      <div class="line"><span style="flex:1">${t('ready')}</span><span style="font-weight:600">${esc(d.eta)} ${t('mins')}</span></div>
+      <div class="line"><span style="flex:1">${t('total')}</span><span style="font-weight:700">${money(d.total)}</span></div>
+    </div>
+    <p style="margin-top:18px"><a class="link" href="?t=${encodeURIComponent(d.token)}">${t('track')}</a></p>
+  </div>`;
+}
+
+function viewTrack() {
+  const o = S.track && S.track.order;
+  if (!o) return `<p class="sub">${t('loading')}</p>`;
+  const order = ['pending', 'accepted', 'ready', 'completed'];
+  const idx = order.indexOf(o.status);
+  const rejected = o.status === 'rejected';
+  return `<div class="center" style="padding-top:22px">
+      <p class="sub" style="margin-bottom:0">${t('orderNo')}</p>
+      <div class="big">#${esc(o.order_no)}</div>
+      ${S.track.branch ? `<p class="muted">${t('collectAt')} ${esc(nm(S.track.branch))}</p>` : ''}
+    </div>
+    <div class="card" style="margin-top:18px">
+      ${rejected
+        ? `<div class="step on"><span class="dot"></span><span><span class="stext">${t('st_rejected')}</span>${o.reject_reason ? `<br><span class="smut">${esc(o.reject_reason)}</span>` : ''}</span></div>`
+        : order.map((st, i) => `<div class="step ${i <= idx ? 'on' : ''}">
+            <span class="dot"></span>
+            <span><span class="stext">${t('st_' + st)}</span>
+            ${st === 'accepted' && i === idx && o.eta ? `<br><span class="smut">${t('ready')} ${esc(o.eta)} ${t('mins')}</span>` : ''}
+            </span></div>`).join('')}
+    </div>
+    <div class="card">${(S.track.items || []).map((l) => `<div class="line">
+        <span style="flex:1">${esc(nm(l))}${l.modifiers && l.modifiers.length ? `<br><span class="muted">${l.modifiers.map((m) => esc(lang === 'ar' && m.nameAr ? m.nameAr : m.nameEn)).join(' · ')}</span>` : ''}</span>
+        <span style="font-weight:600">x${esc(l.qty)}</span></div>`).join('')}
+      <div class="tot"><span>${t('total')}</span><span>${money(o.total)}</span></div>
+    </div>
+    <p class="center" style="margin-top:16px"><a class="link" href="?">${t('newOrder')}</a></p>`;
+}
+
+/* ---------------- modifier sheet ---------------- */
+function sheetHTML() {
+  const p = S.picking;
+  if (!p) return '';
+  const groups = p.groups;
+  const ok = groups.every((g) => (S.sel[g.group_id] || []).length >= g.min_select);
+  const extra = groups.flatMap((g) => S.sel[g.group_id] || [])
+    .reduce((s, id) => s + Number((S.menu.modifierOptions.find((o) => o.id === id) || {}).price_delta || 0), 0);
+  return `<div class="sheet" id="sheet-bg"><div class="sheetin">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+      <strong style="font-size:1.05rem">${esc(nm(p.item))}</strong>
+      <button class="qbtn" id="sheet-x" type="button" style="width:34px;height:34px">x</button>
+    </div>
+    ${groups.map((g) => {
+      const sel = S.sel[g.group_id] || [];
+      const multi = g.max_select > 1;
+      return `<div class="grp">
+        <div class="grphead"><span class="grpname">${esc(nm(g))}</span>
+          <span class="req">${g.min_select >= 1 ? t('required') : (multi ? t('upto') + ' ' + g.max_select : '')}</span></div>
+        ${g.options.map((o) => `<label class="opt">
+          <input type="${multi ? 'checkbox' : 'radio'}" name="g${esc(g.group_id)}" value="${esc(o.id)}" ${sel.includes(o.id) ? 'checked' : ''} data-group="${esc(g.group_id)}">
+          <span style="flex:1">${esc(nm(o))}</span>
+          ${Number(o.price_delta) ? `<span class="muted">+${money(o.price_delta)}</span>` : ''}
+        </label>`).join('')}
+      </div>`;
+    }).join('')}
+    <button class="btn" id="sheet-add" ${ok ? '' : 'disabled'} type="button" style="margin-top:18px;width:100%">
+      ${t('add')} · ${money(Number(p.item.price) + extra)}
+    </button>
+  </div></div>`;
+}
+
+/* ---------------- bottom bar ---------------- */
+function barHTML() {
+  if (S.view === 'menu' && S.cart.length)
+    return `<div class="bar"><div class="barin"><button class="btn" id="go-cart" type="button">${t('cart')} (${cartCount()}) · ${money(cartTotal())}</button></div></div>`;
+  if (S.view === 'cart' && S.cart.length)
+    return `<div class="bar"><div class="barin">
+      <button class="btn ghost" id="go-menu" type="button">${t('back')}</button>
+      <button class="btn" id="go-checkout" type="button">${t('checkout')}</button></div></div>`;
+  if (S.view === 'checkout')
+    return `<div class="bar"><div class="barin">
+      <button class="btn ghost" id="go-cart2" type="button">${t('back')}</button>
+      <button class="btn" id="do-place" type="button" ${S.busy ? 'disabled' : ''}>${S.busy ? t('placing') : t('place')}</button></div></div>`;
+  return '';
+}
+
+/* ---------------- render + events ---------------- */
+function render() {
+  document.body.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  document.documentElement.lang = lang;
+  $('lang').textContent = lang === 'ar' ? 'English' : 'العربية';
+  const v = S.view;
+  $('app').innerHTML =
+    v === 'branches' ? viewBranches() :
+    v === 'menu'     ? viewMenu() :
+    v === 'cart'     ? viewCart() :
+    v === 'checkout' ? viewCheckout() :
+    v === 'done'     ? viewDone() :
+    v === 'track'    ? viewTrack() :
+    `<p class="sub">${t('loading')}</p>`;
+  $('bar').innerHTML = barHTML();
+  $('sheet').innerHTML = sheetHTML();
+}
+
+document.addEventListener('click', async (e) => {
+  const el = (sel) => e.target.closest(sel);
+
+  if (el('#lang')) { lang = lang === 'ar' ? 'en' : 'ar'; localStorage.setItem('hassadLang', lang); return render(); }
+
+  const b = el('[data-branch]');
+  if (b) return pickBranch(b.dataset.branch);
+
+  const c = el('[data-cat]');
+  if (c) { S.cat = c.dataset.cat; return render(); }
+
+  const it = el('[data-item]');
+  if (it) return openItem(it.dataset.item);
+
+  if (el('#sheet-x') || e.target.id === 'sheet-bg') { S.picking = null; S.sel = {}; return render(); }
+  if (el('#sheet-add')) {
+    const ids = S.picking.groups.flatMap((g) => S.sel[g.group_id] || []);
+    addToCart(S.picking.item, ids);
+    S.picking = null; S.sel = {}; return render();
+  }
+
+  const inc = el('[data-inc]'), dec = el('[data-dec]');
+  if (inc) { S.cart[+inc.dataset.inc].qty++; return render(); }
+  if (dec) { const l = S.cart[+dec.dataset.dec]; l.qty--; if (l.qty < 1) S.cart.splice(+dec.dataset.dec, 1); return render(); }
+
+  if (el('#go-cart') || el('#go-cart2')) { S.view = 'cart'; S.err = ''; return render(); }
+  if (el('#go-menu')) { S.view = 'menu'; return render(); }
+  if (el('#go-checkout')) { S.view = 'checkout'; S.err = ''; return render(); }
+  if (el('#do-place')) return placeOrder();
+});
+
+// Radios/checkboxes inside the sheet. Re-rendering on every tap would lose
+// focus, so update state and only repaint the Add button's price.
+document.addEventListener('change', (e) => {
+  const inp = e.target.closest('.opt input');
+  if (!inp || !S.picking) return;
+  const gid = inp.dataset.group;
+  const g = S.picking.groups.find((x) => x.group_id === gid);
+  if (inp.type === 'radio') S.sel[gid] = [inp.value];
+  else {
+    const cur = new Set(S.sel[gid] || []);
+    if (inp.checked) { if (cur.size >= g.max_select) { inp.checked = false; return; } cur.add(inp.value); }
+    else cur.delete(inp.value);
+    S.sel[gid] = [...cur];
+  }
+  render();
+});
+
+async function boot() {
+  const token = new URLSearchParams(location.search).get('t');
+  if (token) { S.view = 'track'; render(); return loadTrack(token); }
+  render();
+  try {
+    const d = await api('menu');
+    if (!d.enabled) { S.branches = []; return render(); }
+    S.branches = d.branches || [];
+    if (S.branches.length === 1 && S.branches[0].open) return pickBranch(S.branches[0].id);
+    render();
+  } catch (err) { S.err = err.message; S.branches = []; render(); }
+}
+
+async function pickBranch(id) {
+  S.view = 'loading'; render();
+  try {
+    const d = await api('menu', { branch_id: id });
+    S.menu = d; S.branch = d.branch; S.cat = (d.categories[0] || {}).id;
+    S.view = 'menu';
+  } catch (err) { S.err = err.message; S.view = 'branches'; }
+  render();
+}
+
+function openItem(itemId) {
+  const item = S.menu.items.find((i) => i.id === itemId);
+  if (!item) return;
+  const assigns = (S.menu.modifierAssigns || []).filter((a) => a.item_id === itemId);
+  const groups = assigns.map((a) => {
+    const g = (S.menu.modifierGroups || []).find((x) => x.id === a.group_id);
+    if (!g) return null;
+    return { ...g, ...a, options: (S.menu.modifierOptions || []).filter((o) => o.group_id === g.id) };
+  }).filter((g) => g && g.options.length).sort((x, y) => x.sort_order - y.sort_order);
+
+  if (!groups.length) { addToCart(item, []); return render(); }
+  S.picking = { item, groups };
+  // Pre-tick the defaults, exactly as the till's picker does.
+  S.sel = {};
+  groups.forEach((g) => { if (g.default_option_id) S.sel[g.group_id] = [g.default_option_id]; });
+  render();
+}
+
+async function placeOrder() {
+  const name = $('f-name').value.trim();
+  const phone = $('f-phone').value.trim();
+  const note = $('f-note').value.trim();
+  if (!name || !phone) { S.err = lang === 'ar' ? 'الرجاء إدخال الاسم ورقم الجوال.' : 'Please enter your name and mobile number.'; return render(); }
+  S.busy = true; S.err = ''; render();
+  try {
+    const d = await api('place', {
+      branch_id: S.branch.id, customer_name: name, customer_phone: phone, note,
+      items: S.cart.map((l) => ({ item_id: l.itemId, qty: l.qty, modifier_option_ids: l.optIds })),
+    });
+    localStorage.setItem('hassadName', name);
+    localStorage.setItem('hassadPhone', phone);
+    S.done = d; S.cart = []; S.view = 'done';
+  } catch (err) { S.err = err.message; }
+  S.busy = false; render();
+}
+
+async function loadTrack(token) {
+  try { S.track = await api('track', { token }); } catch (err) { S.err = err.message; }
+  render();
+  // A customer leaves this open while they walk over; keep it current.
+  if (S.track && ['pending', 'accepted'].includes(S.track.order.status)) setTimeout(() => loadTrack(token), 20000);
+}
+
+boot();
+</script>
+</body>
+</html>
