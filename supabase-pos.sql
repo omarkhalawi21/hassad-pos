@@ -1130,6 +1130,155 @@ CREATE POLICY "koinz_redemptions_delete" ON public.koinz_redemptions FOR DELETE 
 ALTER TABLE public.branches ADD COLUMN IF NOT EXISTS phone text NOT NULL DEFAULT '';
 
 -- =============================================================
+-- 21. ONLINE ORDERING -- direct customer orders, no aggregator
+--     Customers order from order.html. That page is PUBLIC and
+--     anonymous, so it never touches these tables: it calls the
+--     `order-intake` Edge Function, which holds the service role,
+--     re-prices every line from the DB and inserts a `pending`
+--     order on the `online` channel. No anon RLS policy is added
+--     anywhere by this block -- that is deliberate.
+--
+--     Lifecycle:  pending -> accepted -> ready -> completed
+--                 pending -> rejected
+--     The branch accepts or rejects from the POS Online screen.
+--
+--     While the counter still runs on Foodics, an accepted order
+--     is keyed into Foodics and settled to its own tender, the
+--     same way KEETA/NINJA orders are reconciled today. Nothing
+--     here depends on that: when the counter moves onto this POS
+--     the identical rows flow straight into the till.
+-- =============================================================
+
+-- Which channel an order came from. Everything rung at the counter
+-- stays 'pos', so existing reports are unaffected by default.
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'pos';
+ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_channel_check;
+ALTER TABLE public.orders ADD CONSTRAINT orders_channel_check
+  CHECK (channel IN ('pos','online'));
+
+-- Who placed it (online only; the counter has no customer record).
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS customer_name  text;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS customer_phone text;
+
+-- The customer's status page is reached by this token alone -- no
+-- login, and it must not be guessable from the order number.
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS public_token uuid DEFAULT gen_random_uuid();
+CREATE UNIQUE INDEX IF NOT EXISTS orders_public_token_idx ON public.orders(public_token);
+
+-- Accept / reject / ready audit.
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS pickup_eta_minutes int;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS accepted_at   timestamptz;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS accepted_by   uuid REFERENCES public.staff(id);
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS rejected_at   timestamptz;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS rejected_by   uuid REFERENCES public.staff(id);
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS reject_reason text;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS ready_at      timestamptz;
+
+-- The online lifecycle states join the existing counter states.
+ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_status_check;
+ALTER TABLE public.orders ADD CONSTRAINT orders_status_check
+  CHECK (status IN ('completed','void','returned','pending','accepted','ready','rejected'));
+
+-- The branch queue reads exactly this slice, so index exactly it.
+CREATE INDEX IF NOT EXISTS orders_online_queue_idx
+  ON public.orders(branch_id, status) WHERE channel = 'online';
+
+-- Online ordering is OFF everywhere until switched on deliberately:
+-- globally in Settings, then per branch.
+ALTER TABLE public.branches ADD COLUMN IF NOT EXISTS accepts_online boolean NOT NULL DEFAULT false;
+ALTER TABLE public.pos_settings ADD COLUMN IF NOT EXISTS online_ordering_enabled boolean NOT NULL DEFAULT false;
+ALTER TABLE public.pos_settings ADD COLUMN IF NOT EXISTS online_prep_minutes int NOT NULL DEFAULT 15;
+ALTER TABLE public.pos_settings ADD COLUMN IF NOT EXISTS online_min_order numeric(12,2) NOT NULL DEFAULT 0;
+
+-- Opening hours per branch per weekday. The page refuses an order
+-- outside these, so a customer cannot pay for coffee nobody is
+-- there to make. Seeded to the 06:00-18:00 trading day.
+CREATE TABLE IF NOT EXISTS public.branch_hours (
+  branch_id  uuid not null references public.branches(id) on delete cascade,
+  dow        int  not null CHECK (dow BETWEEN 0 AND 6),   -- 0 = Sunday
+  open_time  time not null default '06:00',
+  close_time time not null default '18:00',
+  closed     boolean not null default false,
+  PRIMARY KEY (branch_id, dow)
+);
+INSERT INTO public.branch_hours (branch_id, dow)
+SELECT b.id, d.dow
+  FROM public.branches b CROSS JOIN (SELECT generate_series(0,6) AS dow) d
+ WHERE NOT EXISTS (
+   SELECT 1 FROM public.branch_hours h WHERE h.branch_id = b.id AND h.dow = d.dow);
+
+-- Is this branch taking orders right this second? Hours are local
+-- Saudi time; the server stores timestamptz, so convert explicitly
+-- rather than trusting the session timezone.
+CREATE OR REPLACE FUNCTION public.branch_is_open(p_branch uuid)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $fn$
+  SELECT COALESCE((
+    SELECT NOT h.closed
+       AND (now() AT TIME ZONE 'Asia/Riyadh')::time >= h.open_time
+       AND (now() AT TIME ZONE 'Asia/Riyadh')::time <  h.close_time
+      FROM public.branch_hours h
+     WHERE h.branch_id = p_branch
+       AND h.dow = EXTRACT(DOW FROM (now() AT TIME ZONE 'Asia/Riyadh'))::int
+  ), false);
+$fn$;
+
+ALTER TABLE public.branch_hours ENABLE ROW LEVEL SECURITY;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT policyname FROM pg_policies
+           WHERE schemaname='public' AND tablename='branch_hours'
+  LOOP EXECUTE format('DROP POLICY IF EXISTS %I ON public.branch_hours', r.policyname); END LOOP;
+END $$;
+CREATE POLICY "branch_hours_select_authenticated"
+  ON public.branch_hours FOR SELECT TO authenticated USING (true);
+CREATE POLICY "branch_hours_insert_roles"
+  ON public.branch_hours FOR INSERT TO authenticated
+  WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "branch_hours_update_roles"
+  ON public.branch_hours FOR UPDATE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager']))
+  WITH CHECK (public.has_role(ARRAY['admin','manager']));
+CREATE POLICY "branch_hours_delete_roles"
+  ON public.branch_hours FOR DELETE TO authenticated
+  USING (public.has_role(ARRAY['admin','manager']));
+
+-- Which items customers may order online. menu_groups already
+-- models channel menus (Koinz Menu / Taker); 'Online' is one more.
+-- An EMPTY group means nothing is orderable -- fill it in Menu
+-- before switching ordering on. That is safer than defaulting to
+-- the whole menu, which would expose COMPENSATION and staff items.
+INSERT INTO public.menu_groups (name)
+SELECT 'Online'
+WHERE NOT EXISTS (SELECT 1 FROM public.menu_groups m WHERE m.name = 'Online');
+
+-- The POS Online screen listens for inserts instead of polling.
+-- Realtime respects RLS, so a cashier still only sees their branch.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname='supabase_realtime')
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_publication_tables
+        WHERE pubname='supabase_realtime' AND schemaname='public' AND tablename='orders')
+  THEN
+    EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE public.orders';
+  END IF;
+END $$;
+
+-- Diagnostic for block 21 -- expect:  t | t | t | 21 | 1
+--   SELECT
+--     (SELECT count(*) = 1 FROM information_schema.tables
+--       WHERE table_schema='public' AND table_name='branch_hours')      AS hours_table,
+--     (SELECT count(*) = 4 FROM pg_policies
+--       WHERE schemaname='public' AND tablename='branch_hours')         AS hours_policies,
+--     (SELECT count(*) = 7 FROM information_schema.columns
+--       WHERE table_schema='public' AND table_name='orders'
+--         AND column_name IN ('channel','customer_name','customer_phone',
+--             'public_token','pickup_eta_minutes','reject_reason','ready_at')) AS order_cols,
+--     (SELECT count(*) FROM public.branch_hours)                        AS hours_rows,
+--     (SELECT count(*) FROM public.menu_groups WHERE name='Online')     AS online_group;
+
+-- =============================================================
 -- DONE.
 --
 -- Diagnostic -- run after pasting; expect one row of counts that
