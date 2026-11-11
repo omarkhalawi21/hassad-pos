@@ -28,6 +28,7 @@
   .badge { display:inline-block; padding:.15rem .6rem; border-radius:999px; font-size:.72rem; font-weight:600; }
   .badge-green { background:#d1fae5; color:#047857; } .badge-red { background:#fee2e2; color:#b91c1c; }
   .badge-slate { background:#f1f5f9; color:#475569; } .badge-amber { background:#fef3c7; color:#b45309; }
+  .badge-blue { background:#dbeafe; color:#1d4ed8; }
   .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); color:#fff; padding:.7rem 1.3rem; border-radius:.8rem; font-size:.875rem; font-weight:500; z-index:9999; box-shadow:0 10px 30px rgba(15,23,42,.25); }
   #modal-root { position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:1000; display:flex; align-items:center; justify-content:center; padding:1rem; }
   .modal-box { background:#fff; border-radius:1.2rem; width:100%; max-width:640px; max-height:92vh; overflow-y:auto; }
@@ -118,9 +119,12 @@ function mapSettingsFromDb(r) {
   return { _id: r.id, companyName: r.company_name || '', companyNameAr: r.company_name_ar || '',
     vatNumber: r.vat_number || '', crNumber: r.cr_number || '', currency: r.currency || 'SAR',
     vatRate: Number(r.vat_rate) || 15, receiptFooterEn: r.receipt_footer_en || '', receiptFooterAr: r.receipt_footer_ar || '',
-    koinzEnabled: !!r.koinz_enabled };
+    koinzEnabled: !!r.koinz_enabled,
+    onlineOrderingEnabled: !!r.online_ordering_enabled,
+    onlinePrepMinutes: Number(r.online_prep_minutes) || 15,
+    onlineMinOrder: Number(r.online_min_order) || 0 };
 }
-function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active, hrBranch: r.hr_branch || '', phone: r.phone || '' }; }
+function mapBranchFromDb(r) { return { id: r.id, name: r.name || '', nameAr: r.name_ar || '', active: !!r.active, hrBranch: r.hr_branch || '', phone: r.phone || '', acceptsOnline: !!r.accepts_online }; }
 function mapRecipeFromDb(r) { return { id: r.id, itemId: r.item_id, hrItemName: r.hr_item_name || '', qty: Number(r.qty) || 0, unit: r.unit || 'units' }; }
 function mapPayMethodFromDb(r) { return { id: r.id, name: r.name || '', code: r.code || '', active: !!r.active, sort: Number(r.sort_order) || 0 }; }
 // Fallback trio keeps checkout usable until SQL block 17 has been run.
@@ -201,7 +205,11 @@ function mapOrderFromDb(r) {
     total: Number(r.total) || 0, cashierId: r.cashier_id, voidReason: r.void_reason || '', createdAt: r.created_at,
     orderType: r.order_type || 'pickup', discountAmount: Number(r.discount_amount) || 0,
     discountReason: r.discount_reason || '', returnedAt: r.returned_at, returnedBy: r.returned_by,
-    shiftId: r.shift_id || null, note: r.note || '', terminal: r.terminal || '' };
+    shiftId: r.shift_id || null, note: r.note || '', terminal: r.terminal || '',
+    channel: r.channel || 'pos', customerName: r.customer_name || '', customerPhone: r.customer_phone || '',
+    pickupEtaMinutes: r.pickup_eta_minutes == null ? null : Number(r.pickup_eta_minutes),
+    acceptedAt: r.accepted_at || null, readyAt: r.ready_at || null,
+    rejectedAt: r.rejected_at || null, rejectReason: r.reject_reason || '' };
 }
 const ORDER_TYPES = { pickup: 'Pickup', dine_in: 'Dine-in', delivery: 'Delivery', drive_thru: 'Drive-thru' };
 function mapOrderItemFromDb(r) {
@@ -375,7 +383,7 @@ async function logout() {
 }
 
 /* -------------------- ROUTING / SHELL -------------------- */
-const routes = ['dashboard', 'pos', 'orders', 'menu', 'item', 'reports', 'branches', 'staff', 'user', 'roles', 'devices', 'display', 'payments', 'settings'];
+const routes = ['dashboard', 'pos', 'orders', 'online', 'menu', 'item', 'reports', 'branches', 'staff', 'user', 'roles', 'devices', 'display', 'payments', 'settings'];
 let authMode = 'login';
 function getRoute() {
   const h = (location.hash || '').replace(/^#\/?/, '').split('/')[0];
@@ -391,6 +399,8 @@ function navItems() {
     { key:'dashboard', label:'Dashboard', show: can('console.dashboard') },
     { key:'pos',       label:'POS',       show: hasApp() },
     { key:'orders',    label:'Orders',    show: hasApp() || hasConsole() },
+    { key:'online',    label: onlinePendingCount() ? `Online (${onlinePendingCount()})` : 'Online',
+      show: (hasApp() || hasConsole()) && !!state.settings?.onlineOrderingEnabled },
     { key:'reports',   label:'Reports',   show: can('console.reports') },
     { key:'menu',      label:'Menu',      show: can('console.menu') },
     { key:'branches',  label:'Branches',  show: can('console.branches') },
@@ -417,6 +427,7 @@ function renderMain() {
   if (!state.session) { app.innerHTML = renderLogin(); return; }
   const me = currentStaff();
   if (!me || !me.active) { app.innerHTML = renderNoAccessGate(); return; }
+  initOnlineSubscription();
   // Customer display: full-screen kiosk page, no shell/nav.
   if (getRoute() === 'display') {
     app.innerHTML = renderCustomerDisplay();
@@ -431,6 +442,7 @@ function renderMain() {
   switch (route) {
     case 'pos':       content = hasApp() ? renderPos() : renderNoSectionGate(); break;
     case 'orders':    content = (hasApp() || hasConsole()) ? renderOrders() : renderNoSectionGate(); break;
+    case 'online':    content = (hasApp() || hasConsole()) ? renderOnlineOrders() : renderNoSectionGate(); break;
     case 'dashboard': content = can('console.dashboard') ? renderDashboard() : denied(); break;
     case 'menu':      content = can('console.menu') ? renderMenu() : denied(); break;
     case 'item':      content = can('console.menu') ? renderItemProfile(getRouteArg()) : denied(); break;
@@ -1312,7 +1324,7 @@ function renderOrders() {
               <td class="px-4 py-2.5"><span class="badge badge-slate">${ORDER_TYPES[o.orderType] || o.orderType}</span></td>
               <td class="px-4 py-2.5 text-slate-600">${escapeHTML(staffName(o.cashierId))}</td>
               <td class="px-4 py-2.5 text-end font-semibold">${fmtMoney(o.total)}${o.discountAmount > 0 ? ` <span class="text-[10px] text-emerald-700">(−${fmtMoney(o.discountAmount)})</span>` : ''}</td>
-              <td class="px-4 py-2.5">${o.status==='void' ? '<span class="badge badge-red">Void</span>' : o.status==='returned' ? '<span class="badge badge-amber">Returned</span>' : '<span class="badge badge-green">Completed</span>'}</td>
+              <td class="px-4 py-2.5">${orderStatusBadge(o.status)}${o.channel === 'online' ? ' <span class="badge badge-blue">Online</span>' : ''}</td>
               <td class="px-4 py-2.5 text-end whitespace-nowrap">
                 <button onclick="printReceipt('${o.id}','customer')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Receipt</button>
                 <button onclick="printReceipt('${o.id}','bar')" class="btn btn-ghost !py-1 !px-2.5 !text-xs">Bar</button>
@@ -1348,6 +1360,269 @@ async function returnOrder(orderId) {
   o.status = 'returned'; o.voidReason = reason.trim(); o.returnedAt = new Date().toISOString();
   render(); toast(`Order #${o.orderNo} returned — refund ${fmtMoney(o.total)} to the customer`, 'success');
   koinzRevoke(orderId);
+}
+
+/* -------------------- ONLINE ORDERS (direct, no aggregator) -------------------- */
+// Orders placed on order.html arrive here as `pending`. They are real rows in
+// `orders` from the moment they land, but every sales figure in this app keys
+// off status === 'completed', so nothing counts as a sale until someone hands
+// the cup over and takes payment below.
+//
+// While the counter still runs on Foodics, an accepted order is keyed into
+// Foodics and settled to its own tender -- the same reconciliation KEETA and
+// NINJA orders already get. Nothing in this screen assumes that; when the
+// counter moves onto this POS the identical rows flow straight into the till.
+
+const ORDER_STATUS_BADGES = {
+  void:      ['badge-red',   'Void'],
+  returned:  ['badge-amber', 'Returned'],
+  pending:   ['badge-amber', 'Awaiting accept'],
+  accepted:  ['badge-blue',  'Being made'],
+  ready:     ['badge-blue',  'Ready'],
+  rejected:  ['badge-red',   'Rejected'],
+  completed: ['badge-green', 'Completed'],
+};
+function orderStatusBadge(status) {
+  const [cls, label] = ORDER_STATUS_BADGES[status] || ORDER_STATUS_BADGES.completed;
+  return `<span class="badge ${cls}">${escapeHTML(label)}</span>`;
+}
+
+// RLS already scopes a cashier to their branch; this narrows it again for
+// admins, who can see every branch but should only work their own queue.
+function onlineVisible() {
+  const me = currentStaff();
+  return (state.orders || []).filter(o =>
+    o.channel === 'online' && (!me?.branchId || o.branchId === me.branchId));
+}
+const ONLINE_LIVE = ['pending', 'accepted', 'ready'];
+function onlineQueue() {
+  return onlineVisible().filter(o => ONLINE_LIVE.includes(o.status))
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));   // oldest first
+}
+function onlinePendingCount() {
+  return (state.orders || []).filter(o => o.channel === 'online' && o.status === 'pending').length;
+}
+function waitedFor(iso) {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const h = Math.floor(mins / 60);
+  return `${h}h ${mins % 60}m ago`;
+}
+
+// The queue needs line items, which loadAll deliberately does not bulk-load.
+// Fetch the missing ones once, then repaint.
+let _onlineDetailsInflight = false;
+async function ensureOnlineDetails() {
+  const missing = onlineQueue().filter(o => !state.orderDetailCache[o.id]).map(o => o.id);
+  if (!missing.length || _onlineDetailsInflight) return;
+  _onlineDetailsInflight = true;
+  try { await Promise.all(missing.map(loadOrderDetail)); render(); }
+  catch (_) { /* a failed detail load must not blank the queue */ }
+  finally { _onlineDetailsInflight = false; }
+}
+
+function renderOnlineOrders() {
+  if (!state.settings?.onlineOrderingEnabled) {
+    return `<div class="max-w-2xl mx-auto mt-10 bg-white rounded-2xl shadow-card p-8 text-center">
+      <h2 class="font-display text-xl font-semibold text-slate-900">Online ordering is off</h2>
+      <p class="text-sm text-slate-500 mt-2">Turn it on in Settings, switch on the branches that should accept orders, then add items to the <strong>Online</strong> menu group so customers have something to buy.</p>
+    </div>`;
+  }
+  ensureOnlineDetails();
+  const queue = onlineQueue();
+  const waiting = queue.filter(o => o.status === 'pending');
+  const making  = queue.filter(o => o.status === 'accepted');
+  const ready   = queue.filter(o => o.status === 'ready');
+
+  const card = (o) => {
+    const d = state.orderDetailCache[o.id];
+    return `<div class="bg-white rounded-2xl shadow-card p-5 mb-3">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <div class="font-display text-lg font-semibold text-slate-900">#${escapeHTML(o.orderNo)} · ${fmtMoney(o.total)} ${escapeHTML(state.settings.currency)}</div>
+          <div class="text-sm text-slate-600 mt-0.5">${escapeHTML(o.customerName)}
+            ${o.customerPhone ? `· <a class="text-brand-700 font-medium" href="tel:${escapeHTML(o.customerPhone)}">${escapeHTML(o.customerPhone)}</a>` : ''}</div>
+          <div class="text-xs text-slate-400 mt-0.5">${escapeHTML(waitedFor(o.createdAt))} · ${escapeHTML(branchName(o.branchId))}</div>
+        </div>
+        ${orderStatusBadge(o.status)}
+      </div>
+      ${o.note ? `<div class="mt-3 text-sm bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-amber-900">${escapeHTML(o.note)}</div>` : ''}
+      <div class="mt-3 border-t border-slate-100 pt-3">
+        ${d ? (d.items.map(l => `<div class="flex justify-between text-sm py-1">
+              <span><span class="font-medium">${escapeHTML(l.qty)}×</span> ${escapeHTML(l.nameEn)}
+                ${(l.modifiers || []).length ? `<div class="text-xs text-brand-700 ps-5">${(l.modifiers || []).map(m => escapeHTML(m.nameEn)).join(' · ')}</div>` : ''}</span>
+              <span class="tabular-nums text-slate-500">${fmtMoney(l.lineTotal)}</span>
+            </div>`).join('') || '<div class="text-xs text-slate-400">No lines.</div>')
+          : '<div class="text-xs text-slate-400">Loading items…</div>'}
+      </div>
+      <div class="mt-4 flex flex-wrap gap-2 justify-end">
+        ${o.status === 'pending' ? `
+          <button onclick="rejectOnlineOrder('${o.id}')" class="btn btn-danger btn-sm">Reject</button>
+          <button onclick="acceptOnlineOrder('${o.id}')" class="btn btn-primary btn-sm">Accept</button>` : ''}
+        ${o.status === 'accepted' ? `
+          <button onclick="printReceipt('${o.id}','bar')" class="btn btn-ghost btn-sm">Bar ticket</button>
+          <button onclick="markOnlineReady('${o.id}')" class="btn btn-primary btn-sm">Mark ready</button>` : ''}
+        ${o.status === 'ready' ? `
+          <button onclick="printReceipt('${o.id}','customer')" class="btn btn-ghost btn-sm">Receipt</button>
+          <button onclick="collectOnlineOrder('${o.id}')" class="btn btn-primary btn-sm">Collected &amp; paid</button>` : ''}
+      </div>
+    </div>`;
+  };
+
+  const group = (title, list, empty) => `
+    <div class="mb-6">
+      <div class="flex items-baseline gap-2 mb-2">
+        <h3 class="font-display font-semibold text-slate-900">${escapeHTML(title)}</h3>
+        <span class="text-xs text-slate-400">${list.length}</span>
+      </div>
+      ${list.map(card).join('') || `<div class="text-sm text-slate-400 bg-white rounded-2xl shadow-card px-5 py-6">${escapeHTML(empty)}</div>`}
+    </div>`;
+
+  return `<div class="max-w-3xl mx-auto">
+    <div class="flex items-center justify-between mb-5">
+      <h2 class="font-display text-2xl font-semibold text-slate-900">Online orders</h2>
+      <button onclick="refreshOnline()" class="btn btn-ghost btn-sm">Refresh</button>
+    </div>
+    ${group('Waiting to be accepted', waiting, 'Nothing waiting. New orders appear here on their own.')}
+    ${group('Being made', making, 'Nothing in progress.')}
+    ${group('Ready for collection', ready, 'Nothing ready.')}
+  </div>`;
+}
+
+async function refreshOnline() {
+  const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+  const { data, error } = await sb.from('orders').select('*')
+    .gte('business_date', weekAgo.toISOString().slice(0, 10))
+    .order('created_at', { ascending: false }).limit(1000);
+  if (error) { toast(humanizeError(error), 'error'); return; }
+  state.orders = (data || []).map(mapOrderFromDb);
+  render();
+}
+
+// Applies one lifecycle change and keeps the local row in step, so the queue
+// moves immediately rather than waiting for a refetch.
+async function setOnlineStatus(orderId, patch, localPatch, okMsg) {
+  const { error } = await sb.from('orders').update(patch).eq('id', orderId);
+  if (error) { toast(humanizeError(error), 'error'); return false; }
+  const o = state.orders.find(x => x.id === orderId);
+  if (o) Object.assign(o, localPatch);
+  render();
+  if (okMsg) toast(okMsg, 'success');
+  return true;
+}
+
+function acceptOnlineOrder(orderId) {
+  const o = state.orders.find(x => x.id === orderId);
+  if (!o) return;
+  const eta = o.pickupEtaMinutes || state.settings.onlinePrepMinutes || 15;
+  openModal(`Accept order #${o.orderNo}`, `
+    <p class="text-sm text-slate-600">${escapeHTML(o.customerName)} will be told how long to wait. Be realistic — this is the number they plan around.</p>
+    <label class="label mt-4" for="online-eta">Ready in (minutes)</label>
+    <input id="online-eta" type="number" min="1" max="120" step="1" class="input" value="${escapeHTML(eta)}">`,
+    async () => {
+      const mins = parseInt($('#online-eta').value, 10);
+      if (!Number.isInteger(mins) || mins < 1 || mins > 120) { toast('Enter between 1 and 120 minutes', 'error'); return false; }
+      const me = currentStaff();
+      const ok = await setOnlineStatus(orderId,
+        { status: 'accepted', accepted_at: new Date().toISOString(), accepted_by: me?.id || null, pickup_eta_minutes: mins },
+        { status: 'accepted', acceptedAt: new Date().toISOString(), pickupEtaMinutes: mins },
+        `Order #${o.orderNo} accepted`);
+      // The bar needs the ticket the moment it is accepted, not at handover.
+      if (ok) printReceipt(orderId, 'bar');
+      return ok;
+    }, { saveLabel: 'Accept' });
+}
+
+async function rejectOnlineOrder(orderId) {
+  const o = state.orders.find(x => x.id === orderId);
+  if (!o) return;
+  const reason = prompt(`Reject order #${o.orderNo} for ${o.customerName} — the customer sees this reason. Why?`);
+  if (!reason?.trim()) return;
+  const me = currentStaff();
+  await setOnlineStatus(orderId,
+    { status: 'rejected', rejected_at: new Date().toISOString(), rejected_by: me?.id || null, reject_reason: reason.trim() },
+    { status: 'rejected', rejectedAt: new Date().toISOString(), rejectReason: reason.trim() },
+    `Order #${o.orderNo} rejected`);
+}
+
+async function markOnlineReady(orderId) {
+  const o = state.orders.find(x => x.id === orderId);
+  if (!o) return;
+  await setOnlineStatus(orderId,
+    { status: 'ready', ready_at: new Date().toISOString() },
+    { status: 'ready', readyAt: new Date().toISOString() },
+    `Order #${o.orderNo} is ready`);
+}
+
+// Handover. This is the step that turns the order into a sale, so it is also
+// where payment is recorded -- without an order_payments row the till's drawer
+// math and the payment-mix report would both be short.
+function collectOnlineOrder(orderId) {
+  const o = state.orders.find(x => x.id === orderId);
+  if (!o) return;
+  const methods = activePayMethods();
+  openModal(`Collect #${o.orderNo}`, `
+    <p class="text-sm text-slate-600">${escapeHTML(o.customerName)} · <strong>${fmtMoney(o.total)} ${escapeHTML(state.settings.currency)}</strong></p>
+    <label class="label mt-4" for="online-pay">Paid by</label>
+    <select id="online-pay" class="input">
+      <option value="cash">Cash</option>
+      ${methods.map(m => `<option value="${escapeHTML(m.code)}">${escapeHTML(m.name)}</option>`).join('')}
+    </select>
+    <p class="text-xs text-slate-400 mt-3">This records the sale against today's till. Rung on Foodics instead? Still mark it here so the order leaves the queue.</p>`,
+    async () => {
+      const method = $('#online-pay').value || 'cash';
+      const shift = openShiftFor(o.branchId);
+      const me = currentStaff();
+      const ok = await setOnlineStatus(orderId,
+        { status: 'completed', cashier_id: me?.id || null, shift_id: shift?.id || null },
+        { status: 'completed', cashierId: me?.id || null, shiftId: shift?.id || null },
+        `Order #${o.orderNo} collected`);
+      if (!ok) return false;
+      const { error } = await sb.from('order_payments').insert({ order_id: orderId, method, amount: o.total });
+      if (error) toast('Collected, but the payment record failed: ' + humanizeError(error), 'error');
+      delete state.orderDetailCache[orderId];
+      return true;
+    }, { saveLabel: 'Collected' });
+}
+
+// A new order must never sit unseen, so listen rather than poll. Realtime
+// enforces RLS, so a cashier is still only told about their own branch.
+let _onlineCh = null;
+function initOnlineSubscription() {
+  if (_onlineCh || !sb || !state.session || !state.settings?.onlineOrderingEnabled) return;
+  _onlineCh = sb.channel('online-orders')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders', filter: 'channel=eq.online' }, ({ new: row }) => {
+      const o = mapOrderFromDb(row);
+      const me = currentStaff();
+      if (me?.branchId && o.branchId !== me.branchId) return;
+      if (state.orders.some(x => x.id === o.id)) return;
+      state.orders.unshift(o);
+      onlineChime();
+      toast(`New online order #${o.orderNo} — ${o.customerName}`, 'success');
+      render();
+    })
+    .subscribe();
+}
+
+// A short chime, synthesised rather than shipped as an asset so the CSP and
+// the offline story both stay simple. Browsers refuse audio before the first
+// interaction on the page; by the time a till is taking orders there has been
+// plenty, and a missed beep is never worth throwing.
+function onlineChime() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.type = 'sine'; osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.55);
+    osc.start(); osc.stop(ctx.currentTime + 0.55);
+    setTimeout(() => { try { ctx.close(); } catch (_) {} }, 900);
+  } catch (_) { /* audio is a nicety, never a failure */ }
 }
 
 /* -------------------- RECEIPT + ZATCA QR -------------------- */
@@ -2559,8 +2834,15 @@ function openBranchModal(id) {
       <div><label class="label">HR inventory branch</label><input id="br-hr" class="input" value="${escapeHTML(editing?.hrBranch || '')}" placeholder="Branch name as written in the Hassad app inventory">
         <p class="text-xs text-slate-400 mt-1">Used by the nightly inventory sync. Leave empty if it matches the POS name.</p></div>
       <div><label class="label">Active</label><select id="br-active" class="input"><option value="1" ${editing?.active !== false ? 'selected':''}>Yes</option><option value="0" ${editing?.active === false ? 'selected':''}>No</option></select></div>
+      <div class="border-t border-slate-100 pt-3">
+        <label class="flex items-center gap-2.5 cursor-pointer">
+          <input id="br-online" type="checkbox" class="w-4 h-4" ${editing?.acceptsOnline ? 'checked':''}>
+          <span class="text-sm font-medium text-slate-800">Accepts online orders</span>
+        </label>
+        <p class="text-xs text-slate-400 mt-1">Customers can pick this branch on the ordering page, within its opening hours.</p>
+      </div>
     </div>`, async () => {
-    const row = { name: $('#br-name').value.trim().toUpperCase(), name_ar: $('#br-ar').value.trim(), phone: $('#br-phone').value.trim(), hr_branch: $('#br-hr').value.trim() || null, active: $('#br-active').value === '1' };
+    const row = { name: $('#br-name').value.trim().toUpperCase(), name_ar: $('#br-ar').value.trim(), phone: $('#br-phone').value.trim(), hr_branch: $('#br-hr').value.trim() || null, active: $('#br-active').value === '1', accepts_online: !!$('#br-online')?.checked };
     if (!row.name) { toast('Name required', 'error'); return false; }
     const q = editing ? sb.from('branches').update(row).eq('id', editing.id) : sb.from('branches').insert(row);
     const { error } = await q;
@@ -2972,6 +3254,18 @@ function renderSettings() {
         <div class="text-[10px] text-slate-500 mt-1">Shows the points prompt after checkout and the Redeem button on the till. Requires the <code>KOINZ_API_KEY</code> secret set on the <code>koinz</code> Edge Function — otherwise calls fail.</div>
         ${isAdmin() ? `<button type="button" onclick="koinzSync()" class="btn btn-ghost btn-sm mt-2">↑ Sync branches &amp; cashiers to Koinz</button><div class="text-[10px] text-slate-500 mt-1">Run once (and after adding branches/staff) so Koinz recognises your cashiers — otherwise points/redeem return “Unauthorized cashier”.</div>` : ''}
       </div>
+      <div class="border-t border-slate-100 pt-3 mt-1">
+        <label class="flex items-center gap-2.5 cursor-pointer">
+          <input id="set-online" type="checkbox" class="w-4 h-4" ${s.onlineOrderingEnabled?'checked':''}>
+          <span class="text-sm font-medium text-slate-800">Online ordering</span>
+        </label>
+        <div class="text-[10px] text-slate-500 mt-1">Opens <code>order.html</code> to customers and adds the Online queue to the nav. Each branch must also be switched on, and only items in the <strong>Online</strong> menu group can be ordered — an empty group sells nothing.</div>
+        <div class="grid grid-cols-2 gap-3 mt-2">
+          <div><label class="label">Ready in (minutes)</label><input id="set-prep" type="number" min="1" max="120" step="1" class="input" value="${s.onlinePrepMinutes}"></div>
+          <div><label class="label">Minimum order</label><input id="set-minorder" type="number" min="0" step="0.01" class="input" value="${s.onlineMinOrder}"></div>
+        </div>
+        <div class="text-[10px] text-slate-500 mt-1">The default wait quoted to a customer; the cashier can change it per order on accept. Set the minimum to 0 for none.</div>
+      </div>
       <button onclick="saveSettings()" class="btn btn-primary">Save settings</button>
     </div>`;
 }
@@ -2980,7 +3274,11 @@ async function saveSettings() {
     vat_number: $('#set-vat').value.trim(), cr_number: $('#set-cr').value.trim(),
     currency: $('#set-currency').value.trim() || 'SAR', vat_rate: parseFloat($('#set-rate').value) || 15,
     receipt_footer_en: $('#set-footer-en').value.trim(), receipt_footer_ar: $('#set-footer-ar').value.trim(),
-    koinz_enabled: !!$('#set-koinz')?.checked, updated_at: new Date().toISOString() };
+    koinz_enabled: !!$('#set-koinz')?.checked,
+    online_ordering_enabled: !!$('#set-online')?.checked,
+    online_prep_minutes: parseInt($('#set-prep')?.value, 10) || 15,
+    online_min_order: parseFloat($('#set-minorder')?.value) || 0,
+    updated_at: new Date().toISOString() };
   const { error } = await sb.from('pos_settings').update(row).eq('id', state.settingsId);
   if (error) { toast(humanizeError(error), 'error'); return; }
   await loadAll(); render(); toast('Settings saved', 'success');
